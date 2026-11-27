@@ -22,3 +22,14 @@ def test_caro_recall_and_edit(tmp_path,monkeypatch):
     assert prepare(rid,Prepare())["item_ids"]==ids
     update(rid,Repertoire(name="new",color="black",pgn="1. e4 e5 *"))
     with connect() as c:assert c.execute("SELECT COUNT(*) FROM training_items WHERE active=1").fetchone()[0]==0
+
+def test_line_branches_legal():
+    from chessbuilder.repertoire import lines
+    g=graph("1. e4 e5 (1... c5) 2. Nf3 *")
+    b=chess.Board()
+    result=lines(g,b,9)
+    assert ("e2e4","e7e5","g1f3") in result
+    for pv in result:
+        q=b.copy()
+        for u in pv:q.push_uci(u)
+        assert len(pv)%2==1

@@ -26,7 +26,7 @@ CATALOG=[
  ("zugzwang","Zugzwang de peões","8/8/4k3/8/4K3/4P3/8/8 b - - 0 1","draw",2,"Observe como a obrigação de mover muda as casas disponíveis."),
  ("lucena","Estrutura de Lucena","1K6/1P1k4/8/8/8/8/r7/7R w - - 0 1","win",4,"Procure cortar o rei defensor e construir uma ponte contra os xeques laterais."),
  ("philidor","Estrutura de Philidor","4k3/8/7r/4K3/4P3/8/8/R7 b - - 0 1","draw",4,"A torre defensora controla a sexta fileira; depois, considere xeques por trás."),
- ("bishops","Bispos de cores opostas","4k3/8/3b4/4P3/3B4/4K3/8/8 b - - 0 1","draw",3,"Bloqueie o avanço do peão e evite entregar casas de entrada."),
+ ("bishops","Bispos de cores opostas","4k3/8/2b5/4P3/3B4/4K3/8/8 b - - 0 1","draw",3,"Bloqueie o avanço do peão e evite entregar casas de entrada."),
  ("knight","Cavalo e peão","7k/8/4K3/4P3/8/3N4/8/8 w - - 0 1","win",3,"Coordene rei e cavalo para apoiar a promoção."),
  ("mixed","Torre contra peão","8/4k3/8/8/4p3/8/4K3/R7 w - - 0 1","win",3,"Avalie se a torre pode conter o peão sem abandonar o rei."),
 ]
@@ -85,13 +85,6 @@ def engine_move(board):
 def opponent_move(board,remote=False):
     # Only use tablebase ranking if every legal child has a known result.
     # Remote lookup is bounded to a single root request for the opponent.
-    if remote and len(board.piece_map())<=7 and not board.castling_rights:
-        try:
-            r=httpx.get("https://tablebase.lichess.ovh/standard",params={"fen":board.fen()},timeout=5);r.raise_for_status()
-            for row in r.json().get("moves",[]):
-                m=chess.Move.from_uci(row["uci"])
-                if m in board.legal_moves:return m
-        except (httpx.HTTPError,ValueError,KeyError,TypeError):pass
     moves=[]
     if os.environ.get("CHESSBUILDER_SYZYGY_DIR"):
         for m in board.legal_moves:
@@ -102,11 +95,18 @@ def opponent_move(board,remote=False):
             moves.append((rank,-dtz if rank>0 else dtz if rank<0 else -dtz,m.uci(),m))
         else:
             if moves:return max(moves,key=lambda x:x[:3])[3]
+    if remote and len(board.piece_map())<=7 and not board.castling_rights:
+        try:
+            r=httpx.get("https://tablebase.lichess.ovh/standard",params={"fen":board.fen()},timeout=5);r.raise_for_status()
+            for row in r.json().get("moves",[]):
+                m=chess.Move.from_uci(row["uci"])
+                if m in board.legal_moves:return m
+        except (httpx.HTTPError,ValueError,KeyError,TypeError):pass
     return engine_move(board)
 
 @router.get("/catalog")
 def catalog():
-    return [{"key":e[0],"title":e[1],"fen":e[2],"goal":e[3],"difficulty":e[4],"theory":e[5],"variants":4,"provenance":"Original illustrative position; objective checked by tablebase when available."} for e in CATALOG]
+    return [{"key":e[0],"title":e[1],"fen":e[2],"goal":e[3],"difficulty":e[4],"theory":e[5],"variants":[catalog_board(e,i).fen() for i in range(4)],"provenance":"Original illustrative position; objective checked by tablebase when available."} for e in CATALOG]
 
 class Start(BaseModel):
     key:str
@@ -126,7 +126,7 @@ def prepare(body:Start):
     with connect() as c:
         insert_item(c,"endgame",None,None,None,b,"endgame_"+goal,[e[0]],[],evidence,e[4],key)
         row=c.execute("SELECT id FROM training_items WHERE item_key=?",(key,)).fetchone()
-    return {"item_id":row[0],"objective":goal,"evaluation":v}
+    return {"item_id":row[0],"objective":goal,"evaluation":v,"fen":b.fen()}
 
 def play_answer(aid,body):
     # Read and perform potentially slow searches outside the database write lock.
@@ -173,3 +173,23 @@ def endgame_hint(aid):
         if current["status"]!="active" or current["answers"]!=a["answers"]:raise HTTPException(409,"Posição mudou")
         n=current["hints"]+1;c.execute("UPDATE training_attempts SET hints=? WHERE id=?",(n,aid))
     return {"hint":"Considere "+b.san(m) if n>1 else "Considere a peça em "+chess.square_name(m.from_square),"hints":n}
+
+class Recognition(Start):
+    guess:int=Field(ge=-1,le=1)
+
+@router.post("/recognize")
+def recognize(body:Recognition):
+    e=next((x for x in CATALOG if x[0]==body.key),None)
+    if not e:raise HTTPException(404,"Final não encontrado")
+    b=catalog_board(e,body.variant);v=exact_value(b,body.remote)
+    if not v or v["effective"] is None:return {"graded":False,"evaluation":v}
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        key=f"{VERSION}:recognition:{e[0]}:{body.variant}"
+        insert_item(c,"endgame_recognition",None,None,None,b,"recognition",[e[0]],[],{"title":e[1],"theory":e[5]},e[4],key)
+        item=c.execute("SELECT id FROM training_items WHERE item_key=?",(key,)).fetchone()[0]
+        c.execute("UPDATE training_items SET active=0 WHERE id=?",(item,))
+        from chessbuilder.training import now
+        stamp=now();correct=int(body.guess==v["effective"])
+        c.execute("INSERT INTO training_attempts(item_id,started_at,finished_at,answers,hints,correct,elapsed_ms,status) VALUES(?,?,?,'[]',0,?,NULL,?)",(item,stamp,stamp,correct,"passed" if correct else "failed"))
+    return {"graded":True,"correct":bool(correct),"evaluation":v}

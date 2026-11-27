@@ -27,3 +27,19 @@ def test_prepare_without_tablebase(tmp_path,monkeypatch):
     r=prepare(Start(key="queen"))
     assert r["evaluation"] is None and r["objective"]=="win"
     assert prepare(Start(key="queen"))["item_id"]==r["item_id"]
+
+def test_recognition_only_grades_exact(tmp_path,monkeypatch):
+    from chessbuilder.endgames import recognize,Recognition
+    from chessbuilder.db import connect
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    monkeypatch.setattr("chessbuilder.endgames.exact_value",lambda *args:None)
+    assert not recognize(Recognition(key="queen",guess=1))["graded"]
+    monkeypatch.setattr("chessbuilder.endgames.exact_value",lambda *args:{"effective":1,"wdl":2,"dtz":1,"source":"fixture"})
+    assert recognize(Recognition(key="queen",guess=1))["correct"]
+    with connect() as c:assert c.execute("SELECT COUNT(*) FROM training_attempts WHERE correct=1").fetchone()[0]==1
+
+def test_opposite_colored_bishops():
+    e=next(x for x in CATALOG if x[0]=="bishops")
+    b=catalog_board(e,0)
+    squares=list(b.pieces(chess.BISHOP,chess.WHITE))+list(b.pieces(chess.BISHOP,chess.BLACK))
+    assert bool(chess.BB_SQUARES[squares[0]] & chess.BB_LIGHT_SQUARES)!=bool(chess.BB_SQUARES[squares[1]] & chess.BB_LIGHT_SQUARES)
