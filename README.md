@@ -97,3 +97,24 @@ A aplicação será single-user, executada localmente, com análise progressiva,
 Partidas importadas, históricos pessoais, PDFs, coleções particulares, avaliações e arquivos de tablebases permanecem no diretório local de dados. Materiais de terceiros mantêm sua proveniência e condições de uso.
 
 O Chess Builder é destinado a estudo, análise pós-partida e preparação prévia para competições.
+
+## Desenvolvimento local
+
+Requisitos: Python 3.11+, Node.js 22+, npm. A partir da raiz:
+
+```sh
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[test]'
+uvicorn chessbuilder.main:app --host 127.0.0.1 --port 8000
+```
+
+Em outro terminal:
+
+```sh
+cd frontend
+npm install
+npm run dev
+```
+
+Abra http://127.0.0.1:5173. Os dados ficam em `~/.local/share/chessbuilder` (override: `CHESSBUILDER_DATA_DIR`). Execute `pytest` e, no frontend, `npm run build` e `npm test`.
