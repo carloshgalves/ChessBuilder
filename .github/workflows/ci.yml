@@ -13,6 +13,7 @@ jobs:
       - run: pip install -e '.[test]'
       - run: sudo apt-get update && sudo apt-get install -y stockfish
       - run: pytest -q
+      - run: python -m chessbuilder.tactical_benchmark
   frontend:
     runs-on: ubuntu-latest
     defaults:

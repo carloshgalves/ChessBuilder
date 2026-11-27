@@ -89,12 +89,29 @@ def generate(body:Generate):
                             d=diagnose(b,m,a)
                             themes=[f["theme"] for f in d["findings"] if f["confidence"]=="line_witness" and f["kind"] in ("missed","allowed")]
                             kind="mate" if (a["best"].get("mate") or 0)>0 else "defense" if met["before"]<55 else "conversion" if met["before"]>=75 else "best_move"
-                            evidence={"diagnosis":d,"loss_pp":met["win_loss"],"played":m.uci(),"analysis_digest":digest(a),"game_id":g["id"],"ply":row["ply"]}
-                            # Only one active personal item per original ply, updated atomically.
-                            key=digest([VERSION,g["id"],row["ply"],digest(a),kind])
-                            c.execute("UPDATE training_items SET active=0 WHERE source='personal' AND game_id=? AND ply=? AND item_key<>?",(g["id"],row["ply"],key))
-                            added+=insert_item(c,"personal",g["id"],row["ply"],job["id"],b,kind,themes or ["unclassified"],solutions,evidence,None,key)
-                            c.execute("UPDATE training_items SET active=1 WHERE item_key=?",(key,))
+                            evidence={"diagnosis":d,"loss_pp":met["win_loss"],"played":m.uci(),"reference":a["best"],"analysis_digest":digest(a),"game_id":g["id"],"ply":row["ply"],"mode":"first"}
+                            def add_exercise(position,exercise_kind,lines,labels,details):
+                                nonlocal added
+                                initial=position.root().fen(en_passant="fen")
+                                history=json.dumps([x.uci() for x in position.move_stack])
+                                duplicate=c.execute("SELECT 1 FROM training_items WHERE active=1 AND source='personal' AND initial_fen=? AND history=? AND kind=? AND game_id<>?",(initial,history,exercise_kind,g["id"])).fetchone()
+                                if duplicate:return
+                                key=digest([VERSION,g["id"],row["ply"],digest(a),exercise_kind])
+                                added+=insert_item(c,"personal",g["id"],row["ply"],job["id"],position,exercise_kind,labels or ["unclassified"],lines,details,None,key)
+                                c.execute("UPDATE training_items SET active=1 WHERE item_key=?",(key,))
+                            add_exercise(b,kind,solutions,themes,evidence)
+                            # Full calculation only where a supplied winning mate line
+                            # actually terminates in checkmate within a bounded horizon.
+                            if kind=="mate":
+                                complete=[pv for pv in solutions if len(pv)%2==1 and 3<=len(pv)<=9 and legal_line(b,pv)[-1][2].is_checkmate()]
+                                if complete:add_exercise(b,"calculation",complete,["mate"],{**evidence,"mode":"line","goal":"mate"})
+                            allowed=[f["theme"] for f in d["findings"] if f["confidence"]=="line_witness" and f["kind"]=="allowed"]
+                            badpv=a["played"].get("pv",[])
+                            if allowed and len(badpv)>1 and legal_line(b,badpv):
+                                after=b.copy();after.push(m)
+                                # This PV is evidence of a refutation, not an independently
+                                # exhaustive list of the opponent's best alternatives.
+                                add_exercise(after,"refutation",[badpv[1:]],allowed,{**evidence,"played":None,"reference":None,"mode":"first"})
                 b.push(m)
     return {"added":added,"eligible":eligible,"unstable":unstable}
 
@@ -158,6 +175,7 @@ def state(a,t,reveal=False):
         data["solutions"]=solutions;data["evidence"]=json.loads(t["evidence"])
         root=reconstruct(t["initial_fen"],json.loads(t["history"]))
         data["solution_san"]=[[step[3] for step in legal_line(root,pv)] for pv in solutions]
+        data["solution_positions"]=[[root.fen(),*[step[2].fen() for step in legal_line(root,pv)]] for pv in solutions]
     return data
 
 @router.post("/items/{item_id}/start")
@@ -192,7 +210,16 @@ def judge_alternative(item,uci):
         played=serialize(engine.analyse(board,limit,root_moves=[move]),board.turn)
         if min(best.get("depth") or 0,played.get("depth") or 0)<10 or not legal_line(board,played.get("pv")):
             raise HTTPException(409,"Análise insuficiente; alternativa não pontuada")
-        if equivalent(best,played):return played["pv"]
+        evidence=json.loads(item["evidence"])
+        ref=evidence.get("reference")
+        if ref is not None and not equivalent(ref,best):
+            raise HTTPException(409,"A avaliação da posição mudou; regenere o exercício")
+        if evidence.get("goal")=="mate" and not (best.get("mate") or 0)>0:
+            raise HTTPException(409,"Mate não demonstrado nesta busca")
+        if equivalent(best,played):
+            if evidence.get("mode")=="line" and not legal_line(board,played["pv"])[-1][2].is_checkmate():
+                raise HTTPException(409,"Linha de mate incompleta; alternativa não pontuada")
+            return played["pv"]
         before,after=win_percent(best),win_percent(played)
         if before is None or after is None or before-after<5:
             raise HTTPException(409,"Alternativa inconclusiva; não pontuada")
@@ -221,10 +248,17 @@ def answer(aid:int,body:Answer):
         a,t=load_attempt(c,aid)
         previous=json.loads(a["answers"])
         if a["status"]!="active" or len(previous)!=body.expected_ply:raise HTTPException(409,"Tentativa ou posição mudou")
-        if t["source"]=="personal" and not previous:
-            known={pv[0] for pv in json.loads(t["solution"])}
-            if body.uci not in known and body.uci!=json.loads(t["evidence"]).get("played"):
-                alternative=(dict(t),body.uci)
+        if t["source"]=="personal":
+            known={pv[len(previous)] for pv in json.loads(t["solution"]) if pv[:len(previous)]==previous and len(pv)>len(previous)}
+            evidence=json.loads(t["evidence"])
+            wrong=evidence.get("played") if not previous else None
+            if body.uci not in known and body.uci!=wrong:
+                candidate=dict(t)
+                candidate["history"]=json.dumps(json.loads(t["history"])+previous)
+                if previous:
+                    evidence["reference"]=None
+                    candidate["evidence"]=json.dumps(evidence)
+                alternative=(candidate,body.uci)
     verdict=judge_alternative(*alternative) if alternative else None
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
@@ -238,17 +272,18 @@ def answer(aid:int,body:Answer):
         except ValueError:raise HTTPException(422,"Lance inválido")
         if m not in b.legal_moves:raise HTTPException(422,"Lance ilegal")
         candidates=[pv for pv in json.loads(t["solution"]) if pv[:len(answers)]==answers and len(pv)>len(answers) and pv[len(answers)]==body.uci]
-        if not candidates and t["source"]=="personal" and body.uci!=json.loads(t["evidence"]).get("played"):
+        if not candidates and t["source"]=="personal" and (answers or body.uci!=json.loads(t["evidence"]).get("played")):
             if verdict is None:raise HTTPException(409,"Alternativa não verificada; repita a tentativa com o motor disponível")
             if verdict:
-                candidates=[verdict]
+                full=answers+verdict
+                candidates=[full]
                 stored=json.loads(t["solution"])
-                if verdict not in stored:
-                    stored.append(verdict)
+                if full not in stored:
+                    stored.append(full)
                     c.execute("UPDATE training_items SET solution=? WHERE id=?",(json.dumps(stored),t["id"]))
         answers.append(body.uci)
         if not candidates:finish(c,a,"failed",answers)
-        elif t["source"]=="personal" or any(len(pv)==len(answers) for pv in candidates):
+        elif (t["source"]=="personal" and json.loads(t["evidence"]).get("mode")!="line") or any(len(pv)==len(answers) for pv in candidates):
             finish(c,a,"passed",answers)
         else:
             # Imported Lichess puzzles contain the opponent response and next user move.
