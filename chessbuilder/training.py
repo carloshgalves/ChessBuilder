@@ -3,6 +3,7 @@ import csv
 import hashlib
 import io
 import json
+import threading
 from datetime import datetime,timezone
 import chess
 from fastapi import APIRouter,HTTPException,Query
@@ -13,6 +14,7 @@ from chessbuilder.tactics import diagnose,phase,legal_line
 
 router=APIRouter(prefix="/api/training")
 VERSION="exercise-v1"
+ADJUDICATION_LOCK=threading.Lock()
 def now():return datetime.now(timezone.utc).isoformat()
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,separators=(",",":")).encode()).hexdigest()
 def reconstruct(initial,history):
@@ -36,6 +38,8 @@ def verified_solutions(board,payload,exclude=None):
     settings=payload.get("settings",{})
     if settings.get("level") not in ("deep","detailed"):return []
     if (best.get("depth") or 0)<10:return []
+    if not best.get("pv") or best["pv"][0]==exclude:return []
+    if exclude and any(s.get("pv") and s["pv"][0]==exclude and equivalent(best,s) for s in payload.get("alternatives",[])):return []
     result={}
     for score in [best,*payload.get("alternatives",[])]:
         pv=score.get("pv") or []
@@ -68,6 +72,8 @@ def generate(body:Generate):
         for g in games:
             job=select_job(c,g["id"])
             if not job:continue
+            # Retire superseded items even when the new evaluation no longer identifies an error.
+            c.execute("UPDATE training_items SET active=0 WHERE source='personal' AND game_id=?",(g["id"],))
             analyses=get_analyses(c,job)
             b=chess.Board(g["initial_fen"])
             for row in c.execute("SELECT ply,uci FROM moves WHERE game_id=? ORDER BY ply",(g["id"],)).fetchall():
@@ -77,7 +83,7 @@ def generate(body:Generate):
                     met=metrics(a)
                     if met and met["win_loss"]>=5:
                         eligible+=1
-                        solutions=verified_solutions(b,a,exclude=m.uci())
+                        solutions=verified_solutions(b,a,exclude=m.uci()) if a.get("played",{}).get("pv",[None])[0:1]==[m.uci()] else []
                         if not solutions:unstable+=1
                         else:
                             d=diagnose(b,m,a)
@@ -112,7 +118,7 @@ def import_puzzles(body:PuzzleImport):
             selected+=1
             try:
                 b=chess.Board(row["FEN"]);pv=row["Moves"].split()
-                if not b.is_valid() or len(pv)<2 or not legal_line(b,pv):raise ValueError("PV inválida")
+                if not b.is_valid() or len(pv)<2 or len(pv)%2!=0 or not legal_line(b,pv):raise ValueError("PV inválida")
                 b.push_uci(pv[0]);solution=pv[1:]
                 rating=int(row["Rating"])
                 if not row["PuzzleId"]:raise ValueError("ID vazio")
@@ -164,6 +170,40 @@ def start_attempt(item_id:int):
             a=c.execute("SELECT * FROM training_attempts WHERE id=?",(aid,)).fetchone()
         return state(a,t)
 
+
+def judge_alternative(item,uci):
+    from chessbuilder.engine import executable,serialize
+    import chess.engine
+    board=reconstruct(item["initial_fen"],json.loads(item["history"]))
+    try:move=chess.Move.from_uci(uci)
+    except ValueError:raise HTTPException(422,"Lance inválido")
+    if move not in board.legal_moves:raise HTTPException(422,"Lance ilegal")
+    path=executable()
+    if not path:raise HTTPException(409,"Stockfish necessário para verificar esta alternativa")
+    if not ADJUDICATION_LOCK.acquire(blocking=False):raise HTTPException(409,"Outra alternativa está em análise")
+    engine=None
+    try:
+        engine=chess.engine.SimpleEngine.popen_uci(path,timeout=10)
+        engine.configure({"Threads":1,"Hash":16})
+        limit=chess.engine.Limit(nodes=120000,time=2)
+        best=serialize(engine.analyse(board,limit),board.turn)
+        played=serialize(engine.analyse(board,limit,root_moves=[move]),board.turn)
+        if min(best.get("depth") or 0,played.get("depth") or 0)<10 or not legal_line(board,played.get("pv")):
+            raise HTTPException(409,"Análise insuficiente; alternativa não pontuada")
+        if equivalent(best,played):return played["pv"]
+        before,after=win_percent(best),win_percent(played)
+        if before is None or after is None or before-after<5:
+            raise HTTPException(409,"Alternativa inconclusiva; não pontuada")
+        return []
+    except (chess.engine.EngineError,OSError,TimeoutError) as exc:
+        raise HTTPException(503,"Stockfish indisponível para validação") from exc
+    finally:
+        try:
+            if engine:
+                try:engine.quit()
+                except Exception:engine.close()
+        finally:ADJUDICATION_LOCK.release()
+
 class Answer(BaseModel):
     uci:str=Field(min_length=4,max_length=5)
     expected_ply:int=Field(ge=0)
@@ -174,6 +214,16 @@ def finish(c,a,status,answers):
 
 @router.post("/attempts/{aid}/answer")
 def answer(aid:int,body:Answer):
+    alternative=None
+    with connect() as c:
+        a,t=load_attempt(c,aid)
+        previous=json.loads(a["answers"])
+        if a["status"]!="active" or len(previous)!=body.expected_ply:raise HTTPException(409,"Tentativa ou posição mudou")
+        if t["source"]=="personal" and not previous:
+            known={pv[0] for pv in json.loads(t["solution"])}
+            if body.uci not in known and body.uci!=json.loads(t["evidence"]).get("played"):
+                alternative=(dict(t),body.uci)
+    verdict=judge_alternative(*alternative) if alternative else None
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
         a,t=load_attempt(c,aid)
@@ -186,6 +236,14 @@ def answer(aid:int,body:Answer):
         except ValueError:raise HTTPException(422,"Lance inválido")
         if m not in b.legal_moves:raise HTTPException(422,"Lance ilegal")
         candidates=[pv for pv in json.loads(t["solution"]) if pv[:len(answers)]==answers and len(pv)>len(answers) and pv[len(answers)]==body.uci]
+        if not candidates and t["source"]=="personal" and body.uci!=json.loads(t["evidence"]).get("played"):
+            if verdict is None:raise HTTPException(409,"Alternativa não verificada; repita a tentativa com o motor disponível")
+            if verdict:
+                candidates=[verdict]
+                stored=json.loads(t["solution"])
+                if verdict not in stored:
+                    stored.append(verdict)
+                    c.execute("UPDATE training_items SET solution=? WHERE id=?",(json.dumps(stored),t["id"]))
         answers.append(body.uci)
         if not candidates:finish(c,a,"failed",answers)
         elif t["source"]=="personal" or any(len(pv)==len(answers) for pv in candidates):

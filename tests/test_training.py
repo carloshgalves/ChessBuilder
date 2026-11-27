@@ -45,3 +45,22 @@ def test_mate_equivalence():
     assert equivalent({"mate":2},{"mate":3})
     assert not equivalent({"mate":2},{"cp":900,"mate":None})
     assert not equivalent({"mate":2},{"mate":-2})
+
+def test_ambiguous_played_move_not_generated(local):
+    from chessbuilder.training import verified_solutions
+    b=chess.Board()
+    best={"cp":100,"mate":None,"depth":15,"pv":["e2e4"]}
+    a={"settings":{"level":"deep"},"best":best,"alternatives":[{"cp":90,"mate":None,"depth":15,"pv":["d2d4"]}]}
+    assert not verified_solutions(b,a,exclude="d2d4")
+    assert not verified_solutions(b,a,exclude="e2e4")
+
+def test_engine_adjudication_persists_alternative(local,monkeypatch):
+    from chessbuilder.training import insert_item
+    with connect() as c:
+        insert_item(c,"personal",None,None,None,chess.Board(),"best_move",["unclassified"],[["e2e4"]],{"played":"a2a3"},None)
+    a=start_attempt(items(limit=50,offset=0)[0]["id"])
+    monkeypatch.setattr("chessbuilder.training.judge_alternative",lambda item,uci:[uci,"d7d5"])
+    result=answer(a["id"],Answer(uci="d2d4",expected_ply=0))
+    assert result["correct"]==1 and ["d2d4","d7d5"] in result["solutions"]
+    a2=start_attempt(result["item"]["id"])
+    assert answer(a2["id"],Answer(uci="d2d4",expected_ply=0))["correct"]==1
