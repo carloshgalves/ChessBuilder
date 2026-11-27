@@ -33,3 +33,6 @@ app.include_router(engine_router)
 
 from chessbuilder.review import router as review_router
 app.include_router(review_router)
+
+from chessbuilder.dashboard import router as dashboard_router
+app.include_router(dashboard_router)

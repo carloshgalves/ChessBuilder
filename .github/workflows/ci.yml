@@ -26,3 +26,22 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run build
+  browser:
+    runs-on: ubuntu-latest
+    env:
+      CHESSBUILDER_DATA_DIR: ${{ runner.temp }}/chessbuilder-e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -e '.[test]'
+      - run: npm install && npm install --no-save @playwright/test
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npx playwright test
+        working-directory: frontend
