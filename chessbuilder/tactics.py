@@ -94,6 +94,10 @@ def scan(board,pv,color):
                 if before.piece_at(s)==p and ray_piece(before,s,dx,dy)==first and ray_piece(before,first,dx,dy)==second:continue
                 if back.piece_type==chess.KING or value(back)>value(front):
                     put(candidates,"pin",i,[s,first,second],"Peça interposta entre atacante e alvo de maior valor.")
+                    if back.piece_type==chess.KING and after.is_pinned(front.color,first) and i+2<len(steps):
+                        _,m2,_,_,v2=steps[i+2]
+                        if m2.from_square==s and m2.to_square==first and v2 and balance(steps[-1][2],color)>start:
+                            put(confirmed,"pin",i,[s,first,second],"Peça absolutamente cravada é capturada na continuação.")
                 if front.piece_type==chess.KING or value(front)>value(back):
                     put(candidates,"skewer",i,[s,first,second],"Alvo mais valioso à frente de outro alvo.")
                     if i+2<len(steps):
@@ -114,6 +118,10 @@ def scan(board,pv,color):
             defended=[s for s in before.attacks(m.to_square) if (p:=before.piece_at(s)) and p.color!=color]
             if defended:
                 put(candidates,"remove_defender",i,[m.to_square,*defended],"Peça capturada defendia outros alvos.")
+                if i+2<len(steps):
+                    _,m2,_,_,v2=steps[i+2]
+                    if m2.to_square in defended and v2 and balance(steps[-1][2],color)>start:
+                        put(confirmed,"remove_defender",i,[m.to_square,m2.to_square],"Após a remoção, a variante captura um alvo defendido.")
             if len(defended)>=2:
                 put(candidates,"overload",i,[m.to_square,*defended],"Defensor tinha múltiplas responsabilidades potenciais.")
         if i+1<len(steps):
@@ -127,11 +135,13 @@ def scan(board,pv,color):
                 # Forced response alone is only a potential attraction/deflection.
                 if reply_victim:
                     put(candidates,"attraction",i,[reply.to_square],"A resposta captura na casa indicada.")
-                guarded=[s for s in after.attacks(reply.from_square) if (p:=after.piece_at(s)) and p.color!=color]
+                guarded=[s for s in after.attacks(reply.from_square) if (p:=after.piece_at(s)) and p.color!=color and reply_after.piece_at(s)==p and s not in reply_after.attacks(reply.to_square)]
                 if guarded:
-                    put(candidates,"deflection",i,[reply.from_square,*guarded],"A resposta desloca um defensor.")
+                    put(candidates,"deflection",i,[reply.from_square,*guarded],"A resposta desloca um defensor e abandona um alvo.")
         if i>=2 and after.is_check() and victim is None:
-            put(candidates,"zwischenzug",i,[m.to_square],"Xeque intermediário; a ordem dos lances exige confirmação.")
+            _,prior,_,_,prior_victim=steps[i-1]
+            if prior_victim and any(x.to_square==prior.to_square and before.is_capture(x) for x in before.legal_moves):
+                put(candidates,"zwischenzug",i,[m.to_square,prior.to_square],"Xeque antes de uma recaptura disponível.")
         for s,p in before.piece_map().items():
             if p.color==color or not rays(p) or after.piece_at(s)!=p:continue
             for target in before.attacks(s):
