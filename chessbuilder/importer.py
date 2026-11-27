@@ -187,8 +187,3 @@ def import_pgn(body:PGNRequest):
 def accounts():
     with connect() as c: return [dict(r) for r in c.execute("SELECT id,source,username FROM accounts ORDER BY source,username")]
 
-@router.get("/games")
-def games(source:str|None=None,limit:int=100,offset:int=0):
-    with connect() as c:
-        rows=c.execute("SELECT id,source,played_at,speed,white,black,white_rating,black_rating,result,player_color,opening,eco FROM games WHERE (? IS NULL OR source=?) ORDER BY played_at DESC,id DESC LIMIT ? OFFSET ?",(source,source,min(max(limit,1),500),max(offset,0)))
-        return [dict(r) for r in rows]
