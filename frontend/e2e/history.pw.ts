@@ -5,7 +5,7 @@ test('import, dashboard and review a local game',async({page})=>{
  await page.getByLabel('Nome do jogador (opcional)').fill('Alice');
  await page.getByLabel('PGN',{exact:true}).fill('[White "Alice"]\n[Black "Bob"]\n[Date "2024.01.01"]\n[Result "1-0"]\n\n1. e4 e5 2. Nf3 Nc6 1-0');
  await page.getByRole('button',{name:'Importar',exact:true}).last().click();
- await expect(page.getByRole('status')).toContainText('1 novas');
+ await expect(page.getByRole('status').filter({hasText:'1 novas'})).toBeVisible();
  await page.getByRole('button',{name:'Visão geral',exact:true}).click();
  await expect(page.getByRole('heading',{name:'Seu xadrez'})).toBeVisible();
  await expect(page.getByText('Partidas do perfil',{exact:true})).toBeVisible();
