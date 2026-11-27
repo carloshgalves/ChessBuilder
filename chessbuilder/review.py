@@ -92,12 +92,14 @@ def detail(game_id:int):
         moves=[dict(r) for r in c.execute("SELECT * FROM moves WHERE game_id=? ORDER BY ply",(game_id,))]
         job=select_job(c,game_id)
         analyses=get_analyses(c,job)
+    from chessbuilder.tactics import diagnose
     board=chess.Board(game["initial_fen"])
     for move in moves:
         a=analyses.get(move["ply"])
         move["analysis"]=a
         if a:
             move["metrics"]=metrics(a)
+            move["diagnosis"]=diagnose(board,chess.Move.from_uci(move["uci"]),a)
             move["best_line"]=line(board,a["best"]["pv"])
             move["played_line"]=line(board,a["played"]["pv"])
             move["variations"]=[line(board,v["pv"]) for v in a["alternatives"]]

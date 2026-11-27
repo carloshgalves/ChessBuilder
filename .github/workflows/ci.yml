@@ -2,34 +2,25 @@ name: Verification
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner for the combined verification
+        type: choice
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-15
+permissions:
+  contents: read
+concurrency:
+  group: verification-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install -e '.[test]'
-      - run: sudo apt-get update && sudo apt-get install -y stockfish
-      - run: pytest -q
-  frontend:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: frontend
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: npm install
-      - run: npm test
-      - run: npm run build
-  browser:
-    runs-on: ubuntu-latest
-    env:
-      CHESSBUILDER_DATA_DIR: ${{ runner.temp }}/chessbuilder-e2e
+  verification:
+    name: Combined verification
+    runs-on: ${{ inputs.runner || (github.head_ref == 'feat/f7-coach' && 'macos-15') || (github.head_ref == 'feat/f6-exercises' && 'ubuntu-24.04-arm') || 'ubuntu-latest' }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,10 +29,47 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: pip install -e '.[test]'
-      - run: npm install && npm install --no-save @playwright/test
+      - name: Install Python dependencies
+        run: pip install -e '.[test]'
+      - name: Install Stockfish (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y stockfish
+          echo "CHESSBUILDER_STOCKFISH=/usr/games/stockfish" >> "$GITHUB_ENV"
+      - name: Install Stockfish (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install stockfish
+          echo "CHESSBUILDER_STOCKFISH=$(brew --prefix stockfish)/bin/stockfish" >> "$GITHUB_ENV"
+      - name: Verify Stockfish is available
+        run: test -x "$CHESSBUILDER_STOCKFISH"
+      - name: Backend tests
+        run: pytest -q
+      - name: Tactical benchmark
+        run: python -m chessbuilder.tactical_benchmark
+      - name: Install frontend dependencies
         working-directory: frontend
-      - run: npx playwright install --with-deps chromium
+        run: npm install
+      - name: Frontend tests
         working-directory: frontend
-      - run: npx playwright test
+        run: npm test
+      - name: Frontend build
         working-directory: frontend
+        run: npm run build
+      - name: Install Playwright
+        working-directory: frontend
+        run: npm install --no-save @playwright/test
+      - name: Install Chromium (Linux)
+        if: runner.os == 'Linux'
+        working-directory: frontend
+        run: npx playwright install --with-deps chromium
+      - name: Install Chromium (macOS)
+        if: runner.os == 'macOS'
+        working-directory: frontend
+        run: npx playwright install chromium
+      - name: Browser tests
+        working-directory: frontend
+        run: npx playwright test
+        env:
+          CHESSBUILDER_DATA_DIR: ${{ runner.temp }}/chessbuilder-e2e
