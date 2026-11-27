@@ -34,3 +34,25 @@ def test_pv_contrast_and_abstention():
 def test_phase():
     assert phase(chess.Board())=="opening"
     assert phase(chess.Board("7k/8/8/8/8/8/4P3/4K3 w - - 0 1"))=="endgame"
+
+def test_fork_witness_and_unrealized_candidate():
+    b=chess.Board("3q4/4k3/8/4N3/8/8/8/4K3 w - - 0 1")
+    assert b.is_valid()
+    pv=["e5c6","e7f8","c6d8"]
+    d=scan(b,pv,chess.WHITE)
+    assert d["valid"] and "fork" in d["confirmed"]
+    partial=scan(b,pv[:1],chess.WHITE)
+    assert "fork" in partial["candidates"] and "fork" not in partial["confirmed"]
+
+def test_skewer_and_discovery_bitboard_paths():
+    b=chess.Board("8/4q3/8/4k3/8/8/8/R5K1 w - - 0 1")
+    d=scan(b,["a1e1","e5f5","e1e7"],chess.WHITE)
+    assert d["valid"] and "skewer" in d["confirmed"]
+    b=chess.Board("q3k3/8/8/8/8/B7/8/R3K3 w - - 0 1")
+    d=scan(b,["a3b4","e8d7","a1a8"],chess.WHITE)
+    assert d["valid"] and "discovered_attack" in d["confirmed"]
+
+def test_same_root_inconsistent_score_does_not_claim_missed():
+    b=chess.Board()
+    payload={"perspective":"white","best":{"cp":300,"mate":None,"pv":["e2e4"]},"played":{"cp":-300,"mate":None,"pv":["e2e4"]}}
+    assert not any(f["kind"] in ("missed","allowed") for f in diagnose(b,chess.Move.from_uci("e2e4"),payload)["findings"])

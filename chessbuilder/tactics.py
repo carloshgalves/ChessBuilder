@@ -1,5 +1,4 @@
 """Deterministic, conservative tactical evidence from legal principal variations."""
-from collections import Counter
 import chess
 
 VALUES={chess.PAWN:1,chess.KNIGHT:3,chess.BISHOP:3,chess.ROOK:5,chess.QUEEN:9,chess.KING:0}
@@ -58,6 +57,8 @@ def scan(board,pv,color):
     """
     steps=legal_line(board,pv)
     if not steps:return {"valid":False,"confirmed":{},"candidates":{}}
+    # Witness only the first eight plies; distant motifs are not attributed to the root decision.
+    steps=steps[:8]
     confirmed={};candidates={}
     def put(target,theme,i,squares=(),detail=""):
         if theme not in target:
@@ -70,7 +71,7 @@ def scan(board,pv,color):
             put(confirmed,"mate",i,[m.to_square],"Xeque-mate executado na variante.")
         targets=threats(after,m.to_square,color)
         previous=threats(before,m.from_square,color)
-        if len(targets)>=2 and targets!=previous:
+        if len(targets)>=2 and targets-previous:
             put(candidates,"fork",i,[m.to_square,*sorted(targets)],"Duas peças relevantes atacadas pelo mesmo atacante.")
             # Only elevate if the attacker actually captures a fork target after the reply,
             # with material benefit at the end of the supplied line.
@@ -103,7 +104,7 @@ def scan(board,pv,color):
             if p.color==color and s!=m.to_square and before.piece_at(s)==p and rays(p):
                 new=threats(after,s,color)-threats(before,s,color)
                 for target in new:
-                    if m.from_square not in chess.between(s,target):continue
+                    if not (chess.BB_SQUARES[m.from_square] & chess.between(s,target)):continue
                     put(candidates,"discovered_attack",i,[s,m.from_square,target],"O lance libera a linha de outra peça.")
                     if i+2<len(steps):
                         _,m2,_,_,v2=steps[i+2]
@@ -135,7 +136,7 @@ def scan(board,pv,color):
             if p.color==color or not rays(p) or after.piece_at(s)!=p:continue
             for target in before.attacks(s):
                 q=before.piece_at(target)
-                if q and q.color==p.color and m.to_square in chess.between(s,target) and target not in after.attacks(s):
+                if q and q.color==p.color and (chess.BB_SQUARES[m.to_square] & chess.between(s,target)) and target not in after.attacks(s):
                     put(candidates,"interference",i,[s,m.to_square,target],"Interrupção de uma linha defensiva.")
     end=steps[-1][2]
     gain=balance(end,color)-start
@@ -163,7 +164,7 @@ def diagnose(board,played,payload):
     def add(theme,evidence,kind,side,confirmed):
         label=LABELS[theme]
         findings.append({"theme":theme,"label":label,"kind":kind,"side":side,"confidence":"line_witness" if confirmed else "candidate","severity_pp":round(loss,2),"evidence":evidence,"explanation":label+": "+evidence["detail"]+(" Evidência na variante analisada." if confirmed else " Hipótese estrutural, sem causalidade demonstrada.")})
-    if loss>=5:
+    if loss>=5 and best[0]!=actual[0]:
         for theme,ev in good["confirmed"].items():
             if theme not in actual_own["confirmed"]:add(theme,ev,"missed","best",True)
         for theme,ev in bad["confirmed"].items():
