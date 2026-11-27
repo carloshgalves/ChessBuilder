@@ -86,7 +86,7 @@ def attempt_stats(c):
         n=len(xs);k=sum(r["correct"]==1 and r["hints"]==0 for r in xs)
         return {"attempts":n,"unassisted_correct":k,"rate":round(k/n,4) if n else None}
     by_source={}
-    for source in ("personal","lichess","endgame","opening"):
+    for source in ("personal","lichess","endgame","opening","endgame_recognition"):
         by_source[source]={"novel":stats([r for r in first if r["source"]==source]),"repeat":stats([r for r in repeat if r["source"]==source])}
     last_by_position={};delayed=[]
     for r in rows:

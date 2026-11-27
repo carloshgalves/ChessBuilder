@@ -28,26 +28,24 @@ def next_review(previous,correct,hints,elapsed_ms,finished,source):
     return {"version":VERSION,"due_at":(finished+timedelta(days=interval)).isoformat(),"interval_days":interval,"difficulty":round(d,3),"repetitions":reps+1}
 
 def sync_reviews(c):
-    # Replay only previously unapplied completions in chronological order.
-    rows=c.execute("""SELECT a.*,t.source FROM training_attempts a JOIN training_items t ON t.id=a.item_id
+    affected=c.execute("""SELECT DISTINCT a.item_id FROM training_attempts a
         LEFT JOIN review_events e ON e.attempt_id=a.id
-        WHERE a.finished_at IS NOT NULL AND e.attempt_id IS NULL ORDER BY a.finished_at,a.id""").fetchall()
-    for a in rows:
-        prev=c.execute("SELECT * FROM review_schedule WHERE item_id=?",(a["item_id"],)).fetchone()
-        # Older historical records can appear after an import. Rebuild the
-        # affected item deterministically rather than applying out of order.
+        LEFT JOIN review_schedule s ON s.item_id=a.item_id
+        JOIN training_items t ON t.id=a.item_id
+        WHERE a.finished_at IS NOT NULL AND t.source!='endgame_recognition'
+        AND (e.attempt_id IS NULL OR s.version IS NULL OR s.version!=?)""",(VERSION,)).fetchall()
+    for (item_id,) in affected:
+        rows=c.execute("""SELECT a.*,t.source FROM training_attempts a JOIN training_items t ON t.id=a.item_id
+            WHERE a.item_id=? AND a.finished_at IS NOT NULL ORDER BY a.finished_at,a.id""",(item_id,)).fetchall()
+        prev=None
+        for a in rows:
+            prev=next_review(prev,a["correct"],a["hints"],a["elapsed_ms"],datetime.fromisoformat(a["finished_at"]),a["source"])
+            c.execute("INSERT OR IGNORE INTO review_events VALUES(?,?)",(a["id"],item_id))
         if prev:
-            last=c.execute("SELECT finished_at,id FROM training_attempts WHERE id=?",(prev["last_attempt_id"],)).fetchone()
-            if (a["finished_at"],a["id"])<(last["finished_at"],last["id"]):
-                c.execute("DELETE FROM review_events WHERE item_id=?",(a["item_id"],))
-                c.execute("DELETE FROM review_schedule WHERE item_id=?",(a["item_id"],))
-                return sync_reviews(c)
-        x=next_review(prev,a["correct"],a["hints"],a["elapsed_ms"],datetime.fromisoformat(a["finished_at"]),a["source"])
-        c.execute("""INSERT INTO review_schedule(item_id,version,due_at,interval_days,difficulty,repetitions,last_attempt_id)
-            VALUES(?,?,?,?,?,?,?) ON CONFLICT(item_id) DO UPDATE SET version=excluded.version,due_at=excluded.due_at,
-            interval_days=excluded.interval_days,difficulty=excluded.difficulty,repetitions=excluded.repetitions,last_attempt_id=excluded.last_attempt_id""",
-            (a["item_id"],x["version"],x["due_at"],x["interval_days"],x["difficulty"],x["repetitions"],a["id"]))
-        c.execute("INSERT INTO review_events VALUES(?,?)",(a["id"],a["item_id"]))
+            c.execute("""INSERT INTO review_schedule(item_id,version,due_at,interval_days,difficulty,repetitions,last_attempt_id)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(item_id) DO UPDATE SET version=excluded.version,due_at=excluded.due_at,
+                interval_days=excluded.interval_days,difficulty=excluded.difficulty,repetitions=excluded.repetitions,last_attempt_id=excluded.last_attempt_id""",
+                (item_id,prev["version"],prev["due_at"],prev["interval_days"],prev["difficulty"],prev["repetitions"],rows[-1]["id"]))
 
 @router.get("/due")
 def due(source:str|None=None,limit:int=Query(100,ge=1,le=500)):
@@ -127,6 +125,8 @@ def start(cycle_id:int,item_id:int):
         t=c.execute("SELECT * FROM training_items WHERE id=?",(item_id,)).fetchone()
         aid=r["attempt_id"]
         if not aid:
+            prior=c.execute("""SELECT 1 FROM wood_cycle_items w LEFT JOIN training_attempts a ON a.id=w.attempt_id WHERE w.cycle_id=? AND w.ordinal<? AND (a.status IS NULL OR a.status='active') LIMIT 1""",(cycle_id,r["ordinal"])).fetchone()
+            if prior:raise HTTPException(409,"Conclua a posição anterior do ciclo")
             if r["completed_at"]:raise HTTPException(409,"Ciclo encerrado")
             aid=c.execute("INSERT INTO training_attempts(item_id,started_at) VALUES(?,?)",(item_id,now())).lastrowid
             c.execute("UPDATE wood_cycle_items SET attempt_id=? WHERE cycle_id=? AND item_id=?",(aid,cycle_id,item_id))

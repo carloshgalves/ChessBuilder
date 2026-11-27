@@ -1,2 +1,4 @@
 # Woodpecker and spaced review
 Immutable item-ID collections with fixed or seeded shuffled order. Each cycle owns one resumable attempt per item and reports unassisted first-attempt accuracy and summed wall-clock attempt time (not active-time telemetry). Retired items remain accessible within already started cycles; new cycles require a replacement collection. Interval-v1 is a deterministic heuristic, not FSRS: success expands intervals, hints shorten them, failure schedules a six-hour retry. Time and difficulty affect the update. Shared attempts are synchronized lazily by due lists and daily plan creation; older attempts are replayed in chronological order. Novel practice remains separate in the coach.
+
+Cycle order is enforced for unstarted items. Recognition-only observations are not placed on the move-practice schedule. Review synchronization rebuilds affected histories deterministically, including late historical completions and version changes.
