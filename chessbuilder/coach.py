@@ -45,8 +45,11 @@ def game_observations(c,games):
             b.push(move)
     return rows,coverage
 
-def aggregate(rows):
+def aggregate(rows,reference_day=None):
     groups=defaultdict(list)
+    if reference_day is None:
+        dated=[date.fromisoformat(r["date"][:10]) for r in rows if r.get("date")]
+        reference_day=max(dated) if dated else None
     for r in rows:
         by_theme=defaultdict(list)
         for f in r["findings"]:by_theme[f["theme"]].append(f)
@@ -62,8 +65,9 @@ def aggregate(rows):
         expected=[r["expected_loss"] for r in failures if r["expected_loss"] is not None]
         games=len({r["game_id"] for r in failures})
         # Shrink small samples; opportunity-weighted loss is a priority index, not predicted rating gain.
-        priority=(k+1)/(n+4)*severity*math.log1p(games)
-        result.append({"theme":theme,"phase":ph,"speed":speed,"opportunities":n,"failures":k,"successes":n-k,"failure_rate":round(k/n,4),"interval":interval,"confidence":"limited" if n<MIN_SAMPLE else "observed","mean_loss_pp":round(severity,2),"expected_score_loss":round(sum(expected)/len(expected),4) if expected else None,"expected_samples":len(expected),"distinct_error_games":games,"priority":round(priority,3),"examples":[{"game_id":r["game_id"],"ply":r["ply"]} for r in sorted(failures,key=lambda r:-r["loss"])[:5]]})
+        recent_weight=sum(2**(-max(0,(reference_day-date.fromisoformat(r["date"][:10])).days)/30) if reference_day and r.get("date") else 0.5 for r in failures)/k if k else 0
+        priority=(k+1)/(n+4)*severity*math.log1p(games)*recent_weight
+        result.append({"theme":theme,"phase":ph,"speed":speed,"opportunities":n,"failures":k,"successes":n-k,"failure_rate":round(k/n,4),"interval":interval,"confidence":"limited" if n<MIN_SAMPLE else "observed","mean_loss_pp":round(severity,2),"expected_score_loss":round(sum(expected)/len(expected),4) if expected else None,"expected_samples":len(expected),"distinct_error_games":games,"priority":round(priority,3),"recency_weight":round(recent_weight,3),"examples":[{"game_id":r["game_id"],"ply":r["ply"]} for r in sorted(failures,key=lambda r:-r["loss"])[:5]]})
     return sorted(result,key=lambda r:(-r["priority"],r["theme"],r["phase"],r["speed"]))
 
 def phase_summary(rows):
@@ -84,7 +88,46 @@ def attempt_stats(c):
     by_source={}
     for source in ("personal","lichess"):
         by_source[source]={"novel":stats([r for r in first if r["source"]==source]),"repeat":stats([r for r in repeat if r["source"]==source])}
-    return {"novel":stats(first),"repeat":stats(repeat),"by_source":by_source,"unseen_external":by_source["lichess"]["novel"],"elapsed_minutes":round(sum(r["elapsed_ms"] or 0 for r in rows)/60000,1)}
+    last_by_position={};delayed=[]
+    for r in rows:
+        key=" ".join(r["fen"].split()[:4])
+        when=datetime.fromisoformat(r["finished_at"])
+        if key in last_by_position and (when-last_by_position[key]).total_seconds()>=3*86400:
+            delayed.append(r)
+        last_by_position[key]=when
+    return {"novel":stats(first),"repeat":stats(repeat),"retention_3d":stats(delayed),"by_source":by_source,"unseen_external":by_source["lichess"]["novel"],"elapsed_minutes":round(sum(r["elapsed_ms"] or 0 for r in rows)/60000,1)}
+
+
+def competitive_transfer(c,rows):
+    """Descriptive before/after exposure cohorts, never a causal estimate."""
+    practice=c.execute("""SELECT a.finished_at,t.themes,t.game_id FROM training_attempts a
+        JOIN training_items t ON t.id=a.item_id
+        WHERE a.correct=1 AND a.hints=0 AND a.finished_at IS NOT NULL
+        ORDER BY a.finished_at,a.id""").fetchall()
+    first={};source_games=defaultdict(set)
+    for p in practice:
+        when=date.fromisoformat(p["finished_at"][:10])
+        for theme in json.loads(p["themes"]):
+            if theme not in first:first[theme]=when
+            if p["game_id"] is not None:source_games[theme].add(p["game_id"])
+    cohorts=defaultdict(lambda:{"before":[],"after":[]})
+    for row in rows:
+        if not row.get("date"):continue
+        played=date.fromisoformat(row["date"][:10])
+        by_theme=defaultdict(list)
+        for f in row["findings"]:by_theme[f["theme"]].append(f)
+        for theme,findings in by_theme.items():
+            if theme not in first or row["game_id"] in source_games[theme]:continue
+            delta=(played-first[theme]).days
+            if not delta or abs(delta)>30:continue
+            bucket="before" if delta<0 else "after"
+            cohorts[(theme,row["phase"],row["speed"] or "unknown")][bucket].append(any(f["kind"] in ("allowed","missed") for f in findings))
+    result=[]
+    for (theme,ph,speed),cohort in sorted(cohorts.items()):
+        before,after=cohort["before"],cohort["after"]
+        if not before or not after:continue
+        result.append({"theme":theme,"phase":ph,"speed":speed,"before_n":len(before),"after_n":len(after),"before_rate":sum(before)/len(before),"after_rate":sum(after)/len(after),"confidence":"observed" if min(len(before),len(after))>=MIN_SAMPLE else "limited","first_practice":first[theme].isoformat()})
+    return result
 
 def read_games(c,speed,start,end,limit,offset=0):
     where,args=filters(speed=speed,start=start,end=end)
@@ -104,14 +147,14 @@ def report(speed:str|None=None,days:int=Query(30,ge=1,le=3650),limit:int=Query(1
         else:
             current,coverage=game_observations(c,read_games(c,speed,start.isoformat(),last.isoformat(),limit))
             previous,previous_coverage=game_observations(c,read_games(c,speed,previous_start.isoformat(),previous_end.isoformat(),limit))
-        competencies=aggregate(current);old=aggregate(previous)
+        competencies=aggregate(current,last);old=aggregate(previous,previous_end if mode=="period" else None)
         old_by={(r["theme"],r["phase"],r["speed"]):r for r in old}
         changes=[]
         for r in competencies:
             p=old_by.get((r["theme"],r["phase"],r["speed"]))
             if p and min(p["opportunities"],r["opportunities"])>=MIN_SAMPLE:
                 changes.append({"theme":r["theme"],"phase":r["phase"],"speed":r["speed"],"current_n":r["opportunities"],"previous_n":p["opportunities"],"failure_rate_change":round(r["failure_rate"]-p["failure_rate"],4)})
-        return {"version":VERSION,"period":{"mode":mode,"start":start.isoformat() if mode=="period" else None,"end":last.isoformat(),"limit":limit,"speed":speed},"coverage":coverage,"previous_coverage":previous_coverage,"competencies":competencies,"phases":phase_summary(current),"previous_phases":phase_summary(previous),"changes":changes,"strengths":[r for r in competencies if r["confidence"]=="observed" and r["interval"][1]<=0.35],"weaknesses":[r for r in competencies if r["confidence"]=="observed" and r["interval"][0]>=0.25],"practice":attempt_stats(c)}
+        return {"version":VERSION,"period":{"mode":mode,"start":start.isoformat() if mode=="period" else None,"end":last.isoformat(),"limit":limit,"speed":speed},"coverage":coverage,"previous_coverage":previous_coverage,"competencies":competencies,"phases":phase_summary(current),"previous_phases":phase_summary(previous),"changes":changes,"strengths":[r for r in competencies if r["confidence"]=="observed" and r["interval"][1]<=0.35],"weaknesses":[r for r in competencies if r["confidence"]=="observed" and r["interval"][0]>=0.25],"practice":attempt_stats(c),"transfer":competitive_transfer(c,current+previous)}
 
 class PlanRequest(BaseModel):
     minutes:int=Field(default=20,ge=5,le=180)
@@ -121,7 +164,7 @@ class PlanRequest(BaseModel):
 
 def select_plan(c,body,day):
     current,_=game_observations(c,read_games(c,body.speed,(day-timedelta(days=29)).isoformat(),day.isoformat(),100))
-    priorities=aggregate(current)
+    priorities=aggregate(current,day)
     priority=defaultdict(float)
     for r in priorities:priority[r["theme"]]=max(priority[r["theme"]],r["priority"])
     candidates=c.execute("""SELECT t.*,g.speed AS game_speed,
@@ -138,12 +181,13 @@ def select_plan(c,body,day):
         goal_match=body.goal=="general" or body.goal=="tactics" and any(t!="unclassified" for t in themes) or body.goal==r["kind"]
         score=(max([priority[t] for t in themes] or [0])+ (8 if due else 3)+(4 if goal_match else 0))
         ranking.append((r,minutes,score,due,themes))
-    selected=[];remaining=body.minutes;used=defaultdict(int)
+    selected=[];remaining=body.minutes;used=defaultdict(int);seen_positions=set()
     while ranking:
-        affordable=[x for x in ranking if x[1]<=remaining]
+        affordable=[x for x in ranking if x[1]<=remaining and " ".join(x[0]["fen"].split()[:4]) not in seen_positions]
         if not affordable:break
         best=max(affordable,key=lambda x:(x[2]-2*min([used[t] for t in x[4]] or [0]),-x[0]["id"]))
         ranking.remove(best);r,m,score,due,themes=best
+        seen_positions.add(" ".join(r["fen"].split()[:4]))
         selected.append({"item_id":r["id"],"minutes":m,"reason":"review_due" if due else "new_practice","themes":themes,"priority":round(score,2)})
         for t in themes:used[t]+=1
         remaining-=m
@@ -212,4 +256,5 @@ def adherence():
     with connect() as c:
         total,finished=c.execute("SELECT COUNT(*),COUNT(completed_at) FROM coach_sessions").fetchone()
         rows=c.execute("SELECT day,COUNT(*) AS planned,COUNT(completed_at) AS finished FROM coach_sessions GROUP BY day ORDER BY day DESC LIMIT 30").fetchall()
-        return {"sessions":total,"completed":finished,"days":[dict(r) for r in rows]}
+        planned,attempted,retired=c.execute("""SELECT COUNT(*),SUM(CASE WHEN a.finished_at IS NOT NULL THEN 1 ELSE 0 END),SUM(CASE WHEN t.active=0 AND si.attempt_id IS NULL THEN 1 ELSE 0 END) FROM coach_session_items si JOIN training_items t ON t.id=si.item_id LEFT JOIN training_attempts a ON a.id=si.attempt_id""").fetchone()
+        return {"sessions":total,"completed":finished,"days":[dict(r) for r in rows],"planned_items":planned,"attempted_items":attempted or 0,"retired_items":retired or 0}

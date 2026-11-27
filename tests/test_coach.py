@@ -58,3 +58,20 @@ def test_latest_mode_uses_disjoint_game_windows(local):
         store(g,p,username="Alice")
     r=report(days=30,limit=1,end="2024-06-01",mode="latest")
     assert r["coverage"]["personal_games"]==1 and r["previous_coverage"]["personal_games"]==1
+
+def test_transfer_excludes_source_games_and_same_day(local):
+    from chessbuilder.coach import competitive_transfer
+    with connect() as c:
+        insert_item(c,"lichess",None,None,None,chess.Board(),"calculation",["fork"],[["e2e4"]],{},1500,"transfer")
+        c.execute("INSERT INTO training_attempts(item_id,started_at,finished_at,correct,status) VALUES(1,'2024-02-01T10:00:00+00:00','2024-02-01T10:01:00+00:00',1,'passed')")
+        def observation(gid,day,kind,speed="rapid"):
+            return {"game_id":gid,"date":day,"phase":"middlegame","speed":speed,"findings":[{"theme":"fork","kind":kind}]}
+        result=competitive_transfer(c,[observation(1,"2024-01-20","missed"),observation(2,"2024-02-01","missed"),observation(3,"2024-02-10","exploited"),observation(4,"2024-02-10","missed","blitz")])
+    assert len(result)==1 and result[0]["before_n"]==1 and result[0]["after_n"]==1
+    assert result[0]["before_rate"]==1 and result[0]["after_rate"]==0 and result[0]["confidence"]=="limited"
+
+def test_plan_does_not_repeat_same_position(local):
+    with connect() as c:
+        for key in ("a","b"):
+            insert_item(c,"lichess",None,None,None,chess.Board(),"calculation",["fork"],[["e2e4"]],{},1500,key)
+    assert len(create_session(PlanRequest(minutes=20))["items"])==1
