@@ -184,7 +184,7 @@ def start_attempt(item_id:int):
         c.execute("BEGIN IMMEDIATE")
         t=c.execute("SELECT * FROM training_items WHERE id=? AND active=1",(item_id,)).fetchone()
         if not t:raise HTTPException(404,"Exercício não encontrado")
-        a=c.execute("SELECT * FROM training_attempts WHERE item_id=? AND status='active' ORDER BY id DESC LIMIT 1",(item_id,)).fetchone()
+        a=c.execute("SELECT * FROM training_attempts a WHERE item_id=? AND status='active' AND NOT EXISTS(SELECT 1 FROM coach_session_items s WHERE s.attempt_id=a.id) ORDER BY id DESC LIMIT 1",(item_id,)).fetchone()
         if not a:
             aid=c.execute("INSERT INTO training_attempts(item_id,started_at) VALUES(?,?)",(item_id,now())).lastrowid
             a=c.execute("SELECT * FROM training_attempts WHERE id=?",(aid,)).fetchone()

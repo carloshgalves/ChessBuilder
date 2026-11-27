@@ -44,12 +44,14 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 3:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
         if version < 2:
             conn.executescript("BEGIN IMMEDIATE;"+TRAINING_SCHEMA+"PRAGMA user_version=2; COMMIT;")
+        if version < 3:
+            conn.executescript("BEGIN IMMEDIATE;"+COACH_SCHEMA+"PRAGMA user_version=3; COMMIT;")
 
 TRAINING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_items(
@@ -66,4 +68,17 @@ CREATE TABLE IF NOT EXISTS training_attempts(
  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','passed','failed','abandoned')));
 CREATE INDEX IF NOT EXISTS training_items_game ON training_items(game_id,ply);
 CREATE INDEX IF NOT EXISTS training_attempts_item ON training_attempts(item_id,finished_at);
+"""
+
+COACH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS coach_sessions(
+ id INTEGER PRIMARY KEY, day TEXT NOT NULL, minutes INTEGER NOT NULL,
+ speed TEXT, goal TEXT NOT NULL, plan TEXT NOT NULL, created_at TEXT NOT NULL,
+ completed_at TEXT, UNIQUE(day,minutes,speed,goal));
+CREATE TABLE IF NOT EXISTS coach_session_items(
+ session_id INTEGER NOT NULL REFERENCES coach_sessions(id) ON DELETE CASCADE,
+ item_id INTEGER NOT NULL REFERENCES training_items(id),
+ ordinal INTEGER NOT NULL, minutes INTEGER NOT NULL,
+ attempt_id INTEGER UNIQUE REFERENCES training_attempts(id),
+ PRIMARY KEY(session_id,item_id), UNIQUE(session_id,ordinal));
 """

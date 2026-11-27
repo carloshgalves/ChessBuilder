@@ -39,3 +39,6 @@ app.include_router(dashboard_router)
 
 from chessbuilder.training import router as training_router
 app.include_router(training_router)
+
+from chessbuilder.coach import router as coach_router
+app.include_router(coach_router)
