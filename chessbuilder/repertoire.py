@@ -128,5 +128,5 @@ def deviations(rid:int,limit:int=Query(100,ge=1,le=1000)):
                 if m["uci"] not in n["moves"]:
                     a=analyses.get(m["ply"])
                     result.append({"game_id":game["id"],"ply":m["ply"],"san":m["san"],"own":side==r["color"],"expected":[x["san"] for x in n["moves"].values()],"rejoins":key(b) in g["nodes"],"exit_score":a["played"] if a else None,"perspective":a["perspective"] if a else None})
-                    break
+                    if key(b) not in g["nodes"]:break
     return result
