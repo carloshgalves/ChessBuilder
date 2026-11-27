@@ -156,6 +156,8 @@ def state(a,t,reveal=False):
     data={"id":a["id"],"item":public_item(t),"fen":b.fen(),"answers":answers,"status":a["status"],"hints":a["hints"],"legal_moves":[m.uci() for m in b.legal_moves] if a["status"]=="active" else [],"correct":a["correct"],"elapsed_ms":a["elapsed_ms"]}
     if reveal or a["status"]!="active":
         data["solutions"]=solutions;data["evidence"]=json.loads(t["evidence"])
+        root=reconstruct(t["initial_fen"],json.loads(t["history"]))
+        data["solution_san"]=[[step[3] for step in legal_line(root,pv)] for pv in solutions]
     return data
 
 @router.post("/items/{item_id}/start")

@@ -64,3 +64,15 @@ def test_engine_adjudication_persists_alternative(local,monkeypatch):
     assert result["correct"]==1 and ["d2d4","d7d5"] in result["solutions"]
     a2=start_attempt(result["item"]["id"])
     assert answer(a2["id"],Answer(uci="d2d4",expected_ply=0))["correct"]==1
+
+def test_inconclusive_alternative_preserves_attempt(local,monkeypatch):
+    from chessbuilder.training import insert_item
+    with connect() as c:
+        insert_item(c,"personal",None,None,None,chess.Board(),"best_move",["unclassified"],[["e2e4"]],{"played":"a2a3"},None)
+    a=start_attempt(items(limit=50,offset=0)[0]["id"])
+    def inconclusive(*args):raise HTTPException(409,"Inconclusive")
+    monkeypatch.setattr("chessbuilder.training.judge_alternative",inconclusive)
+    with pytest.raises(HTTPException):answer(a["id"],Answer(uci="d2d4",expected_ply=0))
+    assert start_attempt(a["item"]["id"])["answers"]==[]
+    result=answer(a["id"],Answer(uci="a2a3",expected_ply=0))
+    assert result["correct"]==0 and result["solution_san"]==[["e4"]]
