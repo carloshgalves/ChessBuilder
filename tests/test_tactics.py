@@ -49,7 +49,7 @@ def test_skewer_and_discovery_bitboard_paths():
     d=scan(b,["a1e1","e5f5","e1e7"],chess.WHITE)
     assert d["valid"] and "skewer" in d["confirmed"]
     b=chess.Board("q3k3/8/8/8/8/B7/8/R3K3 w - - 0 1")
-    d=scan(b,["a3b4","e8f8","a1a8"],chess.WHITE)
+    d=scan(b,["a3b4","e8d7","a1a8"],chess.WHITE)
     assert d["valid"] and "discovered_attack" in d["confirmed"]
 
 def test_same_root_inconsistent_score_does_not_claim_missed():
