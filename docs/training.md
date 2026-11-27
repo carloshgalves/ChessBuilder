@@ -1,0 +1,2 @@
+# Training
+Personal exercises are generated from selected deeper evaluations (depth ≥10), with a loss of at least five percentage points. Alternative root lines are accepted only if recorded within the score tolerance; no live engine adjudication is used. Personal exercises currently assess the first move; Lichess CSV puzzles assess the full supplied line. The CSV must include PuzzleId, FEN, Moves, Rating and Themes. Lichess puzzle data is CC0. The initial move is the opponent's setup move. Hints and attempts persist. Source PGN and game history remain local.

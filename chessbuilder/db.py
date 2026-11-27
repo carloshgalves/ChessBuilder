@@ -44,7 +44,26 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        if version > 2:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
+        if version < 2:
+            conn.executescript("BEGIN IMMEDIATE;"+TRAINING_SCHEMA+"PRAGMA user_version=2; COMMIT;")
+
+TRAINING_SCHEMA = """
+CREATE TABLE IF NOT EXISTS training_items(
+ id INTEGER PRIMARY KEY, item_key TEXT NOT NULL UNIQUE, source TEXT NOT NULL,
+ game_id INTEGER REFERENCES games(id), ply INTEGER, job_id INTEGER REFERENCES jobs(id),
+ initial_fen TEXT NOT NULL, history TEXT NOT NULL, fen TEXT NOT NULL,
+ kind TEXT NOT NULL, themes TEXT NOT NULL, phase TEXT NOT NULL,
+ solution TEXT NOT NULL, evidence TEXT NOT NULL, difficulty INTEGER, created_at TEXT NOT NULL,
+ active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS training_attempts(
+ id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL REFERENCES training_items(id),
+ started_at TEXT NOT NULL, finished_at TEXT, answers TEXT NOT NULL DEFAULT '[]',
+ hints INTEGER NOT NULL DEFAULT 0, correct INTEGER, elapsed_ms INTEGER,
+ status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','passed','failed','abandoned')));
+CREATE INDEX IF NOT EXISTS training_items_game ON training_items(game_id,ply);
+CREATE INDEX IF NOT EXISTS training_attempts_item ON training_attempts(item_id,finished_at);
+"""
