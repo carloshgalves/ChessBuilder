@@ -42,3 +42,6 @@ app.include_router(training_router)
 
 from chessbuilder.coach import router as coach_router
 app.include_router(coach_router)
+
+from chessbuilder.endgames import router as endgame_router
+app.include_router(endgame_router)

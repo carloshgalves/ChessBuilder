@@ -171,6 +171,11 @@ def state(a,t,reveal=False):
     b=reconstruct(t["initial_fen"],json.loads(t["history"]))
     for u in answers:b.push_uci(u)
     data={"id":a["id"],"item":public_item(t),"fen":b.fen(),"answers":answers,"status":a["status"],"hints":a["hints"],"legal_moves":[m.uci() for m in b.legal_moves] if a["status"]=="active" else [],"correct":a["correct"],"elapsed_ms":a["elapsed_ms"]}
+    if t["source"]=="endgame":
+        ev=json.loads(t["evidence"])
+        data["objective"]=ev["goal"];data["theory"]=ev["theory"]
+        outcome=b.outcome(claim_draw=True)
+        if outcome:data["result"]=outcome.result()
     if reveal or a["status"]!="active":
         data["solutions"]=solutions;data["evidence"]=json.loads(t["evidence"])
         root=reconstruct(t["initial_fen"],json.loads(t["history"]))
@@ -243,6 +248,12 @@ def finish(c,a,status,answers):
 
 @router.post("/attempts/{aid}/answer")
 def answer(aid:int,body:Answer):
+    with connect() as c:
+        _,item=load_attempt(c,aid)
+        special=item["source"]=="endgame"
+    if special:
+        from chessbuilder.endgames import play_answer
+        return play_answer(aid,body)
     alternative=None
     with connect() as c:
         a,t=load_attempt(c,aid)
@@ -296,6 +307,12 @@ def answer(aid:int,body:Answer):
 
 @router.post("/attempts/{aid}/hint")
 def hint(aid:int):
+    with connect() as c:
+        _,item=load_attempt(c,aid)
+        special=item["source"]=="endgame"
+    if special:
+        from chessbuilder.endgames import endgame_hint
+        return endgame_hint(aid)
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
         a,t=load_attempt(c,aid)
