@@ -18,3 +18,6 @@ def health():
 def profile():
     with connect() as conn:
         return dict(conn.execute("SELECT * FROM profiles WHERE id=1").fetchone())
+
+from chessbuilder.importer import router as import_router
+app.include_router(import_router)
