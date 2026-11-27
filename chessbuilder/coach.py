@@ -72,32 +72,38 @@ def phase_summary(rows):
     return [{"phase":ph,"speed":sp,"analysed":len(v),"mean_loss_pp":round(sum(r["loss"] for r in v)/len(v),2),"critical":sum(r["loss"]>=10 for r in v)} for (ph,sp),v in sorted(groups.items())]
 
 def attempt_stats(c):
-    rows=c.execute("""SELECT a.*,t.source,t.themes FROM training_attempts a JOIN training_items t ON t.id=a.item_id WHERE a.finished_at IS NOT NULL ORDER BY a.finished_at,a.id""").fetchall()
+    rows=c.execute("""SELECT a.*,t.source,t.themes,t.fen FROM training_attempts a JOIN training_items t ON t.id=a.item_id WHERE a.finished_at IS NOT NULL ORDER BY a.finished_at,a.id""").fetchall()
     seen=set();first=[];repeat=[]
     for r in rows:
-        target=repeat if r["item_id"] in seen else first
-        seen.add(r["item_id"]);target.append(r)
+        position=" ".join(r["fen"].split()[:4])
+        target=repeat if position in seen else first
+        seen.add(position);target.append(r)
     def stats(xs):
         n=len(xs);k=sum(r["correct"]==1 and r["hints"]==0 for r in xs)
         return {"attempts":n,"unassisted_correct":k,"rate":round(k/n,4) if n else None}
     by_source={}
     for source in ("personal","lichess"):
         by_source[source]={"novel":stats([r for r in first if r["source"]==source]),"repeat":stats([r for r in repeat if r["source"]==source])}
-    return {"novel":stats(first),"repeat":stats(repeat),"by_source":by_source,"elapsed_minutes":round(sum(r["elapsed_ms"] or 0 for r in rows)/60000,1)}
+    return {"novel":stats(first),"repeat":stats(repeat),"by_source":by_source,"unseen_external":by_source["lichess"]["novel"],"elapsed_minutes":round(sum(r["elapsed_ms"] or 0 for r in rows)/60000,1)}
 
-def read_games(c,speed,start,end,limit):
+def read_games(c,speed,start,end,limit,offset=0):
     where,args=filters(speed=speed,start=start,end=end)
-    return c.execute("SELECT g.* FROM games g"+where+(" AND " if where else " WHERE ")+"g.player_color IS NOT NULL ORDER BY g.played_at DESC,g.id DESC LIMIT ?",(*args,limit)).fetchall()
+    return c.execute("SELECT g.* FROM games g"+where+(" AND " if where else " WHERE ")+"g.player_color IS NOT NULL ORDER BY g.played_at DESC,g.id DESC LIMIT ? OFFSET ?",(*args,limit,offset)).fetchall()
 
 @router.get("/report")
-def report(speed:str|None=None,days:int=Query(30,ge=1,le=3650),limit:int=Query(100,ge=1,le=1000),end:str|None=None):
+def report(speed:str|None=None,days:int=Query(30,ge=1,le=3650),limit:int=Query(100,ge=1,le=1000),end:str|None=None,mode:str="period"):
     try: last=date.fromisoformat(end) if end else datetime.now(timezone.utc).date()
     except ValueError:raise HTTPException(422,"Data inválida")
+    if mode not in ("period","latest"):raise HTTPException(422,"Modo inválido")
     start=last-timedelta(days=days-1);previous_end=start-timedelta(days=1);previous_start=previous_end-timedelta(days=days-1)
     with connect() as c:
         c.execute("BEGIN")
-        current,coverage=game_observations(c,read_games(c,speed,start.isoformat(),last.isoformat(),limit))
-        previous,previous_coverage=game_observations(c,read_games(c,speed,previous_start.isoformat(),previous_end.isoformat(),limit))
+        if mode=="latest":
+            current,coverage=game_observations(c,read_games(c,speed,None,last.isoformat(),limit))
+            previous,previous_coverage=game_observations(c,read_games(c,speed,None,last.isoformat(),limit,offset=limit))
+        else:
+            current,coverage=game_observations(c,read_games(c,speed,start.isoformat(),last.isoformat(),limit))
+            previous,previous_coverage=game_observations(c,read_games(c,speed,previous_start.isoformat(),previous_end.isoformat(),limit))
         competencies=aggregate(current);old=aggregate(previous)
         old_by={(r["theme"],r["phase"],r["speed"]):r for r in old}
         changes=[]
@@ -105,7 +111,7 @@ def report(speed:str|None=None,days:int=Query(30,ge=1,le=3650),limit:int=Query(1
             p=old_by.get((r["theme"],r["phase"],r["speed"]))
             if p and min(p["opportunities"],r["opportunities"])>=MIN_SAMPLE:
                 changes.append({"theme":r["theme"],"phase":r["phase"],"speed":r["speed"],"current_n":r["opportunities"],"previous_n":p["opportunities"],"failure_rate_change":round(r["failure_rate"]-p["failure_rate"],4)})
-        return {"version":VERSION,"period":{"start":start.isoformat(),"end":last.isoformat(),"limit":limit,"speed":speed},"coverage":coverage,"previous_coverage":previous_coverage,"competencies":competencies,"phases":phase_summary(current),"previous_phases":phase_summary(previous),"changes":changes,"strengths":[r for r in competencies if r["confidence"]=="observed" and r["interval"][1]<=0.35],"weaknesses":[r for r in competencies if r["confidence"]=="observed" and r["interval"][0]>=0.25],"practice":attempt_stats(c)}
+        return {"version":VERSION,"period":{"mode":mode,"start":start.isoformat() if mode=="period" else None,"end":last.isoformat(),"limit":limit,"speed":speed},"coverage":coverage,"previous_coverage":previous_coverage,"competencies":competencies,"phases":phase_summary(current),"previous_phases":phase_summary(previous),"changes":changes,"strengths":[r for r in competencies if r["confidence"]=="observed" and r["interval"][1]<=0.35],"weaknesses":[r for r in competencies if r["confidence"]=="observed" and r["interval"][0]>=0.25],"practice":attempt_stats(c)}
 
 class PlanRequest(BaseModel):
     minutes:int=Field(default=20,ge=5,le=180)
@@ -147,7 +153,8 @@ def session_state(c,sid):
     s=c.execute("SELECT * FROM coach_sessions WHERE id=?",(sid,)).fetchone()
     if not s:raise HTTPException(404,"Sessão não encontrada")
     rows=c.execute("""SELECT si.*,a.status,a.correct,a.hints,t.active FROM coach_session_items si JOIN training_items t ON t.id=si.item_id LEFT JOIN training_attempts a ON a.id=si.attempt_id WHERE si.session_id=? ORDER BY si.ordinal""",(sid,)).fetchall()
-    return {"id":sid,"day":s["day"],"completed_at":s["completed_at"],"plan":json.loads(s["plan"]),"items":[dict(r) for r in rows],"completed_items":sum(r["status"] in ("passed","failed","abandoned") for r in rows)}
+    retired=sum(not r["active"] and r["attempt_id"] is None for r in rows)
+    return {"id":sid,"day":s["day"],"completed_at":s["completed_at"],"plan":json.loads(s["plan"]),"items":[dict(r) for r in rows],"completed_items":sum(r["status"] in ("passed","failed","abandoned") for r in rows),"retired_items":retired}
 
 @router.post("/sessions")
 def create_session(body:PlanRequest):
@@ -156,9 +163,17 @@ def create_session(body:PlanRequest):
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
         row=c.execute("SELECT id FROM coach_sessions WHERE day=? AND minutes=? AND speed IS ? AND goal=?",(day.isoformat(),body.minutes,body.speed,body.goal)).fetchone()
-        if row:return session_state(c,row["id"])
-        plan=select_plan(c,body,day)
-        sid=c.execute("INSERT INTO coach_sessions(day,minutes,speed,goal,plan,created_at) VALUES(?,?,?,?,?,?)",(day.isoformat(),body.minutes,body.speed,body.goal,json.dumps(plan),now())).lastrowid
+        if row:
+            existing=session_state(c,row["id"])
+            # An empty or wholly unstarted obsolete plan can be rebuilt.
+            if existing["completed_at"] or any(x["attempt_id"] for x in existing["items"]) or (existing["items"] and not existing["retired_items"]):return existing
+            sid=row["id"]
+            c.execute("DELETE FROM coach_session_items WHERE session_id=?",(sid,))
+            plan=select_plan(c,body,day)
+            c.execute("UPDATE coach_sessions SET plan=? WHERE id=?",(json.dumps(plan),sid))
+        else:
+            plan=select_plan(c,body,day)
+            sid=c.execute("INSERT INTO coach_sessions(day,minutes,speed,goal,plan,created_at) VALUES(?,?,?,?,?,?)",(day.isoformat(),body.minutes,body.speed,body.goal,json.dumps(plan),now())).lastrowid
         for i,x in enumerate(plan["items"]):c.execute("INSERT INTO coach_session_items(session_id,item_id,ordinal,minutes) VALUES(?,?,?,?)",(sid,x["item_id"],i,x["minutes"]))
         return session_state(c,sid)
 
@@ -188,7 +203,7 @@ def complete_session(sid:int):
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
         result=session_state(c,sid)
-        if not result["items"] or result["completed_items"]!=len(result["items"]):raise HTTPException(409,"Conclua os exercícios da sessão")
+        if not result["completed_items"] or result["completed_items"]+result["retired_items"]!=len(result["items"]):raise HTTPException(409,"Conclua os exercícios da sessão")
         c.execute("UPDATE coach_sessions SET completed_at=COALESCE(completed_at,?) WHERE id=?",(now(),sid))
         return session_state(c,sid)
 

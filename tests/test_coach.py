@@ -36,3 +36,25 @@ def test_plan_persistence_and_completion(local):
     r=report(days=30,limit=100)
     assert r["practice"]["novel"]["rate"]==1
     assert r["practice"]["repeat"]["rate"] is None
+
+def test_empty_plan_can_be_refreshed_and_session_isolated(local):
+    from chessbuilder.training import start_attempt
+    req=PlanRequest(minutes=5)
+    empty=create_session(req)
+    assert empty["items"]==[]
+    with connect() as c:
+        insert_item(c,"lichess",None,None,None,chess.Board(),"calculation",["fork"],[["e2e4"]],{},1500,"later")
+    s=create_session(req)
+    assert s["id"]==empty["id"] and len(s["items"])==1
+    item=s["items"][0]["item_id"]
+    a=start_session_item(s["id"],item)
+    standalone=start_attempt(item)
+    assert a["id"]!=standalone["id"]
+
+def test_latest_mode_uses_disjoint_game_windows(local):
+    from chessbuilder.importer import parse,store
+    for day in ("2024.01.01","2024.01.02","2024.01.03"):
+        g,p=next(parse(f'[White "Alice"]\n[Black "Bob"]\n[Date "{day}"]\n[Result "*"]\n\n1. e4 *'))
+        store(g,p,username="Alice")
+    r=report(days=30,limit=1,end="2024-06-01",mode="latest")
+    assert r["coverage"]["personal_games"]==1 and r["previous_coverage"]["personal_games"]==1
