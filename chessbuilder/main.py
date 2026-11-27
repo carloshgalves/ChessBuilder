@@ -5,7 +5,13 @@ from chessbuilder.db import connect, migrate
 @asynccontextmanager
 async def lifespan(app):
     migrate()
-    yield
+    from chessbuilder.engine import Worker
+    worker=Worker()
+    worker.start()
+    try:
+        yield
+    finally:
+        worker.stop()
 
 app = FastAPI(title="Chess Builder", lifespan=lifespan)
 
@@ -21,3 +27,6 @@ def profile():
 
 from chessbuilder.importer import router as import_router
 app.include_router(import_router)
+
+from chessbuilder.engine import router as engine_router
+app.include_router(engine_router)

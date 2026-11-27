@@ -118,3 +118,7 @@ npm run dev
 ```
 
 Abra http://127.0.0.1:5173. Os dados ficam em `~/.local/share/chessbuilder` (override: `CHESSBUILDER_DATA_DIR`). Execute `pytest` e, no frontend, `npm run build` e `npm test`.
+
+### Stockfish
+
+Instale o Stockfish pelo gerenciador de pacotes (Debian: `sudo apt install stockfish`) ou aponte `CHESSBUILDER_STOCKFISH` para o executável. Na aba Análise, configure nível, threads, hash e variantes; a fila processa uma partida por vez. Pausa e retomada ocorrem entre lances. Execute apenas uma instância do backend (um worker Uvicorn).
