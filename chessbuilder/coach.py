@@ -167,16 +167,18 @@ def select_plan(c,body,day):
     priorities=aggregate(current,day)
     priority=defaultdict(float)
     for r in priorities:priority[r["theme"]]=max(priority[r["theme"]],r["priority"])
-    candidates=c.execute("""SELECT t.*,g.speed AS game_speed,
+    from chessbuilder.repetition import sync_reviews
+    sync_reviews(c)
+    candidates=c.execute("""SELECT t.*,g.speed AS game_speed,s.due_at AS scheduled_due,
         (SELECT COUNT(*) FROM training_attempts a WHERE a.item_id=t.id AND a.finished_at IS NOT NULL) AS attempted,
         (SELECT MAX(a.finished_at) FROM training_attempts a WHERE a.item_id=t.id AND a.finished_at IS NOT NULL) AS last_attempt,
         (SELECT a.correct FROM training_attempts a WHERE a.item_id=t.id AND a.finished_at IS NOT NULL ORDER BY a.finished_at DESC,a.id DESC LIMIT 1) AS last_correct
-        FROM training_items t LEFT JOIN games g ON g.id=t.game_id WHERE t.active=1 AND (? IS NULL OR t.source IN ('lichess','endgame','opening') OR g.speed=?) ORDER BY t.id""",(body.speed,body.speed)).fetchall()
+        FROM training_items t LEFT JOIN games g ON g.id=t.game_id LEFT JOIN review_schedule s ON s.item_id=t.id WHERE t.active=1 AND (? IS NULL OR t.source IN ('lichess','endgame','opening') OR g.speed=?) ORDER BY t.id""",(body.speed,body.speed)).fetchall()
     ranking=[]
     for r in candidates:
         themes=json.loads(r["themes"]);minutes=8 if r["source"]=="endgame" else 4 if r["kind"] in ("calculation","conversion") else 3
         last=date.fromisoformat(r["last_attempt"][:10]) if r["last_attempt"] else None
-        due=bool(last and (day-last).days>=(3 if r["last_correct"] else 1))
+        due=bool(r["scheduled_due"] and r["scheduled_due"][:10]<=day.isoformat()) if r["scheduled_due"] else bool(last and (day-last).days>=(3 if r["last_correct"] else 1))
         if last and not due:continue
         goal_match=body.goal=="general" or body.goal=="tactics" and any(t!="unclassified" for t in themes) or body.goal==r["kind"]
         score=(max([priority[t] for t in themes] or [0])+ (8 if due else 3)+(4 if goal_match else 0))

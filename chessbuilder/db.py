@@ -44,7 +44,7 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 3:
+        if version > 4:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
@@ -52,6 +52,8 @@ def migrate(path=None):
             conn.executescript("BEGIN IMMEDIATE;"+TRAINING_SCHEMA+"PRAGMA user_version=2; COMMIT;")
         if version < 3:
             conn.executescript("BEGIN IMMEDIATE;"+COACH_SCHEMA+"PRAGMA user_version=3; COMMIT;")
+        if version < 4:
+            conn.executescript("BEGIN IMMEDIATE;"+REPETITION_SCHEMA+"PRAGMA user_version=4; COMMIT;")
 
 TRAINING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_items(
@@ -81,4 +83,25 @@ CREATE TABLE IF NOT EXISTS coach_session_items(
  ordinal INTEGER NOT NULL, minutes INTEGER NOT NULL,
  attempt_id INTEGER UNIQUE REFERENCES training_attempts(id),
  PRIMARY KEY(session_id,item_id), UNIQUE(session_id,ordinal));
+"""
+
+REPETITION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS review_schedule(
+ item_id INTEGER PRIMARY KEY REFERENCES training_items(id), version TEXT NOT NULL,
+ due_at TEXT NOT NULL, interval_days REAL NOT NULL, difficulty REAL NOT NULL,
+ repetitions INTEGER NOT NULL, last_attempt_id INTEGER NOT NULL REFERENCES training_attempts(id));
+CREATE TABLE IF NOT EXISTS review_events(
+ attempt_id INTEGER PRIMARY KEY REFERENCES training_attempts(id), item_id INTEGER NOT NULL REFERENCES training_items(id));
+CREATE TABLE IF NOT EXISTS wood_collections(
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL, order_mode TEXT NOT NULL,
+ item_ids TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS wood_cycles(
+ id INTEGER PRIMARY KEY, collection_id INTEGER NOT NULL REFERENCES wood_collections(id),
+ number INTEGER NOT NULL, target_minutes INTEGER NOT NULL, started_at TEXT NOT NULL, completed_at TEXT,
+ UNIQUE(collection_id,number));
+CREATE TABLE IF NOT EXISTS wood_cycle_items(
+ cycle_id INTEGER NOT NULL REFERENCES wood_cycles(id), ordinal INTEGER NOT NULL,
+ item_id INTEGER NOT NULL REFERENCES training_items(id), attempt_id INTEGER UNIQUE REFERENCES training_attempts(id),
+ PRIMARY KEY(cycle_id,ordinal), UNIQUE(cycle_id,item_id));
+CREATE INDEX IF NOT EXISTS review_due ON review_schedule(due_at);
 """

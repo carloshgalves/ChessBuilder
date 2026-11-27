@@ -10,5 +10,5 @@ def test_migration_and_persistence(tmp_path, monkeypatch):
     migrate()
     assert db_path().exists()
     with TestClient(app) as client:
-        assert client.get("/api/health").json()=={"status":"ok","schema":3}
+        assert client.get("/api/health").json()=={"status":"ok","schema":4}
         assert client.get("/api/profile").json()["name"]=="Teste"

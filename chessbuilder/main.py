@@ -48,3 +48,6 @@ app.include_router(endgame_router)
 
 from chessbuilder.repertoire import router as repertoire_router
 app.include_router(repertoire_router)
+
+from chessbuilder.repetition import router as repetition_router
+app.include_router(repetition_router)
