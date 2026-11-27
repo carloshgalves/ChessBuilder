@@ -76,3 +76,15 @@ def test_inconclusive_alternative_preserves_attempt(local,monkeypatch):
     assert start_attempt(a["item"]["id"])["answers"]==[]
     result=answer(a["id"],Answer(uci="a2a3",expected_ply=0))
     assert result["correct"]==0 and result["solution_san"]==[["e4"]]
+
+def test_personal_full_calculation(local):
+    from chessbuilder.training import insert_item
+    # Sequence supplied for state-machine verification; independent mate fixtures
+    # are covered by the tactical detector corpus.
+    with connect() as c:
+        insert_item(c,"personal",None,None,None,chess.Board(),"calculation",["mate"],[["e2e4","e7e5","g1f3"]],{"mode":"line","goal":"mate"},None)
+    a=start_attempt(items(limit=50,offset=0)[0]["id"])
+    a=answer(a["id"],Answer(uci="e2e4",expected_ply=0))
+    assert a["status"]=="active" and a["answers"]==["e2e4","e7e5"]
+    a=answer(a["id"],Answer(uci="g1f3",expected_ply=2))
+    assert a["status"]=="passed" and len(a["solution_positions"][0])==4
