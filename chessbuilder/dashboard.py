@@ -69,16 +69,17 @@ def streaks(games):
 def summarize_history(games,c):
     games=[dict(g) for g in games]
     own=[g for g in games if g["player_color"]]
+    completed=[g for g in own if outcome(g) is not None]
     outcomes=Counter(outcome(g) for g in own)
     streams=defaultdict(list)
     for g in own: streams[(g["source"],g["speed"] or "unknown",g["account_id"])].append(g)
     ratings=[{"source":s,"speed":speed,"account_id":aid,**trajectory(gs)} for (s,speed,aid),gs in streams.items()]
     gaps=[]
-    dated=[g for g in games if date(g)]
+    dated=[g for g in own if date(g)]
     for a,b in zip(dated,dated[1:]):
         days=(date(b)-date(a)).days
         if days>=14:gaps.append({"days":days,"from":a["played_at"],"to":b["played_at"],"game_id":b["id"]})
-    acc=defaultdict(list);losses=[];captures=Counter();pieces=Counter();clock_values=[];mates=Counter();converted=opportunities=0;recovered=losing=0;timed_errors=timed_positions=0
+    acc=defaultdict(list);worst_move=None;captures=Counter();pieces=Counter();clock_values=[];mates=Counter();converted=opportunities=0;recovered=losing=0;timed_errors=timed_positions=0
     best_game=None
     for g in own:
         job=select_job(c,g["id"])
@@ -98,7 +99,8 @@ def summarize_history(games,c):
             if m is None:continue
             if a["perspective"]!=g["player_color"]:continue
             game_acc.append(m["accuracy"])
-            losses.append({"game_id":g["id"],"ply":row["ply"],"san":san,"loss":round(m["win_loss"],2)})
+            if m["win_loss"]>0 and (worst_move is None or m["win_loss"]>worst_move["loss"]):
+                worst_move={"game_id":g["id"],"ply":row["ply"],"san":san,"loss":m["win_loss"]}
             if m["before"]>=75:adv=True
             if m["before"]<=25:disadv=True
             if row["clock"] is not None and row["clock"]<=30:
@@ -111,14 +113,15 @@ def summarize_history(games,c):
         if game_acc:
             acc[g["player_color"]].extend(game_acc);acc["all"].extend(game_acc)
             expected=sum(row["ply"]%2==own_ply for row in moves)
-            if len(game_acc)==expected:
+            if len(game_acc)==expected and outcome(g) is not None:
                 candidate={"game_id":g["id"],"accuracy":avg(game_acc),"opponent":opponent(g)}
                 if best_game is None or candidate["accuracy"]>best_game["accuracy"]:best_game=candidate
     best_win=max((g for g in own if outcome(g)=="win" and rating(g,True) is not None),key=lambda g:rating(g,True),default=None)
-    return {"total":len(games),"personal_games":len(own),"outcomes":{k:outcomes[k] for k in ("win","loss","draw")},"ratings":ratings,"gaps":sorted(gaps,key=lambda x:-x["days"])[:10],"streaks":streaks(own),
+    if worst_move: worst_move["loss"]=round(worst_move["loss"],2)
+    return {"total":len(games),"personal_games":len(own),"completed_personal_games":len(completed),"outcomes":{k:outcomes[k] for k in ("win","loss","draw")},"ratings":ratings,"gaps":sorted(gaps,key=lambda x:-x["days"])[:10],"streaks":streaks([g for g in completed if date(g)]),
         "colors":grouped(own,lambda g:g["player_color"]),"openings":grouped(own,lambda g:g["opening"] or g["eco"]),"opponents":grouped(own,opponent),"opponent_bands":grouped(own,band),
-        "hours_utc":grouped(games,lambda g:f"{date(g).hour:02d}:00" if date(g) else None),"months":grouped(games,lambda g:g["played_at"][:7] if date(g) else None),"terminations":grouped(games,lambda g:g["termination"]),
-        "accuracy":{k:avg(acc[k]) for k in ("all","white","black")},"analysed_plies":len(acc["all"]),"best_game":best_game,"worst_move":max(losses,key=lambda x:x["loss"],default=None),
+        "hours_utc":grouped(own,lambda g:f"{date(g).hour:02d}:00" if date(g) else None),"months":grouped(own,lambda g:g["played_at"][:7] if date(g) else None),"terminations":grouped(own,lambda g:g["termination"]),
+        "accuracy":{k:avg(acc[k]) for k in ("all","white","black")},"analysed_plies":len(acc["all"]),"best_game":best_game,"worst_move":worst_move,
         "best_win":{"game_id":best_win["id"],"opponent":opponent(best_win),"rating":rating(best_win,True)} if best_win else None,
         "mates":{"received":mates["received"],"delivered":mates["delivered"]},"piece_moves":dict(pieces),"piece_captures":dict(captures),
         "clock":{"mean_remaining_seconds":avg(clock_values),"observations":len(clock_values),"critical_errors_under_30s":timed_errors,"analysed_under_30s":timed_positions},
@@ -135,6 +138,7 @@ def dashboard(source:str|None=None,speed:str|None=None,account_id:int|None=None,
     if a and b and a>b:raise HTTPException(422,"Período inválido")
     where,args=filters(source=source,speed=speed,account_id=account_id,start=start,end=end)
     with connect() as c:
+        c.execute("BEGIN")
         rows=c.execute("SELECT g.* FROM games g"+where+" ORDER BY g.played_at IS NULL,g.played_at,g.id",args).fetchall()
         result=summarize_history(rows,c)
         if a and b:
