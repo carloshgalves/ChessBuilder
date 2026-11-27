@@ -1,0 +1,2 @@
+# Opening repertoire
+PGN editing and export preserve authored text. Legal four-field FEN keys merge transpositions. The Caro-Kann example is original introductory material, not a claim of optimal theory. Recall uses authored moves; bounded line training varies opponent branches. Exit scores refer to the side moving, not the final result. Repertoire edits retire obsolete items without deleting attempts.

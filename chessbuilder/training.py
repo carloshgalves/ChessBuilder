@@ -298,7 +298,7 @@ def answer(aid:int,body:Answer):
             finish(c,a,"passed",answers)
         else:
             # Imported Lichess puzzles contain the opponent response and next user move.
-            chosen=candidates[0]
+            chosen=candidates[(aid+len(answers))%len(candidates)] if t["source"]=="opening" else candidates[0]
             if len(chosen)>len(answers):answers.append(chosen[len(answers)])
             if len(chosen)==len(answers):finish(c,a,"passed",answers)
             else:c.execute("UPDATE training_attempts SET answers=? WHERE id=?",(json.dumps(answers),aid))
