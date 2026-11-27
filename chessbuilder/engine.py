@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import shutil
 import threading
@@ -13,11 +14,13 @@ from chessbuilder.importer import context_key
 
 router=APIRouter(prefix="/api")
 LEVELS={"quick":12000,"deep":120000,"detailed":350000}
+ANALYSIS_PROTOCOL=2
 class Settings(BaseModel):
     level:str="quick"
     threads:int=Field(default=2,ge=1,le=8)
     hash_mb:int=Field(default=128,ge=16,le=1024)
     multipv:int=Field(default=2,ge=1,le=5)
+    auto_deepen:bool=True
 
 def settings_json(s):
     if s.level not in LEVELS: raise HTTPException(422,"Nível inválido")
@@ -38,7 +41,7 @@ def temperatures():
 def identity(engine,path):
     with open(path,"rb") as binary:
         digest=hashlib.file_digest(binary,"sha256").hexdigest()
-    return {"name":engine.id.get("name","Stockfish"),"binary_sha256":digest}
+    return {"name":engine.id.get("name","Stockfish"),"binary_sha256":digest,"analysis_protocol":ANALYSIS_PROTOCOL}
 
 def serialize(info,turn):
     score=info["score"].pov(turn)
@@ -46,7 +49,7 @@ def serialize(info,turn):
     return {"cp":score.score(),"mate":score.mate(),"pv":[m.uci() for m in info.get("pv",[])],"depth":info.get("depth"),"nodes":info.get("nodes"),"wdl":list(wdl.pov(turn)) if wdl else None}
 
 def search(engine,board,settings,engine_id,root=None,multipv=1):
-    key=hashlib.sha256(json.dumps([context_key(board),board.fen(),engine_id,settings.model_dump(),root.uci() if root else None,multipv],sort_keys=True).encode()).hexdigest()
+    key=hashlib.sha256(json.dumps([ANALYSIS_PROTOCOL,context_key(board),board.fen(),engine_id,settings.model_dump(),root.uci() if root else None,multipv],sort_keys=True).encode()).hexdigest()
     with connect() as c:
         row=c.execute("SELECT payload FROM evaluations WHERE cache_key=?",(key,)).fetchone()
         if row: return json.loads(row[0])
@@ -55,11 +58,38 @@ def search(engine,board,settings,engine_id,root=None,multipv=1):
     with connect() as c: c.execute("INSERT OR REPLACE INTO evaluations VALUES(?,?)",(key,json.dumps(result)))
     return result
 
-def analyse_move(engine,board,move,settings,engine_id):
+def search_move(engine,board,move,settings,engine_id):
     best=search(engine,board,settings,engine_id)[0]
     played=best if best["pv"] and best["pv"][0]==move.uci() else search(engine,board,settings,engine_id,root=move)[0]
     alternatives=search(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count())) if settings.multipv>1 else [best]
     return {"engine":engine_id,"settings":settings.model_dump(),"perspective":"white" if board.turn else "black","best":best,"played":played,"alternatives":alternatives}
+
+def estimated_chance(score):
+    mate=score.get("mate")
+    if mate is not None: return 1.0 if mate>0 else 0.0
+    cp=score.get("cp")
+    return None if cp is None else 1/(1+math.exp(-0.00368208*max(-10000,min(10000,cp))))
+
+def analyse_move(engine,board,move,settings,engine_id):
+    quick=search_move(engine,board,move,settings,engine_id)
+    if settings.level!="quick" or not settings.auto_deepen: return quick
+    best,played=quick["best"],quick["played"]
+    before,after=estimated_chance(best),estimated_chance(played)
+    if before is not None and after is not None and before-after>=0.10:
+        result=search_move(engine,board,move,settings.model_copy(update={"level":"deep"}),engine_id)
+        result["refined_from"]="quick"
+        return result
+    return quick
+
+def consistent_checkpoint(job,engine_id):
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        rows=c.execute("SELECT payload FROM move_analysis WHERE job_id=?",(job["id"],)).fetchall()
+        if any(json.loads(r[0]).get("engine")!=engine_id for r in rows):
+            c.execute("DELETE FROM move_analysis WHERE job_id=?",(job["id"],))
+            c.execute("UPDATE jobs SET next_ply=1 WHERE id=?",(job["id"],))
+            return 1
+        return job["next_ply"]
 
 class Worker:
     def __init__(self):
@@ -100,9 +130,10 @@ class Worker:
             engine.configure({"Threads":s.threads,"Hash":s.hash_mb})
             if "UCI_ShowWDL" in engine.options: engine.configure({"UCI_ShowWDL":True})
             eid=identity(engine,path)
+            next_ply=consistent_checkpoint(job,eid)
             for row in moves:
                 move=chess.Move.from_uci(row["uci"])
-                if row["ply"]>=job["next_ply"]:
+                if row["ply"]>=next_ply:
                     with connect() as c: status=c.execute("SELECT status FROM jobs WHERE id=?",(job["id"],)).fetchone()[0]
                     if self.shutdown.is_set() or status!="running": return
                     result=analyse_move(engine,board,move,s,eid)
@@ -128,7 +159,10 @@ def enqueue(body:QueueRequest):
     with connect() as c:
         if body.game_id is not None and not c.execute("SELECT 1 FROM games WHERE id=?",(body.game_id,)).fetchone(): raise HTTPException(404,"Partida não encontrada")
         c.execute("INSERT OR IGNORE INTO jobs(game_id,settings,status,priority) SELECT id,?,'queued',? FROM games WHERE (? IS NULL OR id=?)",(settings,int(body.game_id is not None),body.game_id,body.game_id))
-        return {"queued":c.execute("SELECT changes()").fetchone()[0]}
+        queued=c.execute("SELECT changes()").fetchone()[0]
+        if body.game_id is not None:
+            c.execute("UPDATE jobs SET priority=1 WHERE game_id=? AND settings=? AND status='queued'",(body.game_id,settings))
+        return {"queued":queued}
 
 @router.get("/analysis/jobs")
 def jobs():
