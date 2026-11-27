@@ -4,7 +4,7 @@ import json
 import re
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import chess
 import chess.pgn
@@ -52,6 +52,14 @@ def parse(text):
         raw=text[offset:stream.tell()].strip()
         yield game,raw
 
+def opening_name(value):
+    if not value:
+        return None
+    parsed=urlparse(value)
+    if parsed.hostname in ("www.chess.com","chess.com") and parsed.path.startswith("/openings/"):
+        return unquote(parsed.path.split("/openings/",1)[1]).replace("-"," ")
+    return value
+
 def store(game,raw,source="pgn",external_id=None,account=None,username=None,meta=None):
     if game.errors:
         raise ValueError("PGN inválido: "+str(game.errors[0]))
@@ -68,11 +76,14 @@ def store(game,raw,source="pgn",external_id=None,account=None,username=None,meta
     control=h.get("TimeControl")
     external_id=external_id or hashlib.sha256(raw.encode()).hexdigest()
     with connect() as conn:
-        existing=conn.execute("SELECT id FROM games WHERE source=? AND external_id=?",(source,external_id)).fetchone()
+        conn.execute("BEGIN IMMEDIATE")
+        existing=conn.execute("SELECT id,player_color,account_id FROM games WHERE source=? AND external_id=?",(source,external_id)).fetchone()
         if existing:
+            if existing["player_color"] is None and color is not None:
+                conn.execute("UPDATE games SET player_color=?,account_id=COALESCE(account_id,?) WHERE id=?",(color,account,existing["id"]))
             return False
         cur=conn.execute("""INSERT INTO games(source,external_id,account_id,played_at,speed,white,black,white_rating,black_rating,result,player_color,opening,eco,termination,initial_fen,pgn,time_control) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (source,external_id,account,meta.get("played_at") or game_date(h),meta.get("speed") or speed(control),white,black,integer(h.get("WhiteElo")),integer(h.get("BlackElo")),h.get("Result","*"),color,meta.get("opening") or h.get("Opening"),h.get("ECO"),meta.get("termination") or h.get("Termination"),initial,raw,control))
+            (source,external_id,account,meta.get("played_at") or game_date(h),meta.get("speed") or speed(control),white,black,integer(h.get("WhiteElo")),integer(h.get("BlackElo")),h.get("Result","*"),color,h.get("Opening") or opening_name(meta.get("opening") or h.get("ECOUrl")),h.get("ECO"),meta.get("termination") or h.get("Termination"),initial,raw,control))
         game_id=cur.lastrowid
         for ply,node in enumerate(game.mainline(),1):
             fen=board.fen()
@@ -90,6 +101,10 @@ def account_id(source,username):
         row=c.execute("SELECT * FROM accounts WHERE source=? AND username=?",(source,username)).fetchone()
         return dict(row)
 
+def retry_delay(headers,attempt):
+    delay=headers.get("Retry-After","")
+    return min(60,max(1,int(delay))) if delay.isdigit() else 2**attempt
+
 def request(client,url,**kw):
     for i in range(4):
         try:
@@ -99,9 +114,8 @@ def request(client,url,**kw):
                 return res
             if i==3:
                 res.raise_for_status()
-            delay=res.headers.get("Retry-After","")
-            time.sleep(min(60,max(1,int(delay))) if delay.isdigit() else 2**i)
-        except (httpx.ConnectError,httpx.TimeoutException):
+            time.sleep(retry_delay(res.headers,i))
+        except httpx.TransportError:
             if i==3: raise
             time.sleep(2**i)
     raise RuntimeError("Falha na requisição")
@@ -118,7 +132,7 @@ def sync(source,username,client):
             g,p=parsed[0]
             if store(g,p,source,external,account["id"],username,meta): added+=1
             else: skipped+=1
-        except (ValueError,TypeError) as exc:
+        except (ValueError,TypeError,KeyError,AttributeError) as exc:
             errors.append({"id":external,"error":str(exc)})
     if source=="chess.com":
         urls=request(client,"https://api.chess.com/pub/player/"+quote(username,safe="")+"/games/archives").json()["archives"]
@@ -131,6 +145,9 @@ def sync(source,username,client):
             before=len(errors)
             for item in reversed(request(client,url).json()["games"]):
                 if item.get("rules") not in (None,"chess"): continue
+                if not item.get("pgn") or not item.get("url"):
+                    errors.append({"id":item.get("url"),"error":"Partida sem PGN ou identificador"})
+                    continue
                 ingest(item["pgn"],item["url"],{"played_at":iso(item.get("end_time")),"speed":item.get("time_class"),"opening":item.get("eco"),"termination":(item.get("white",{}).get("result") if item.get("white",{}).get("result")!="win" else item.get("black",{}).get("result"))})
             if len(errors)==before and not url.endswith(current): completed.add(url)
             with connect() as c: c.execute("UPDATE accounts SET cursor=? WHERE id=?",(json.dumps(sorted(completed)),account["id"]))
@@ -139,15 +156,28 @@ def sync(source,username,client):
         if account["cursor"]: params["since"]=max(0,int(account["cursor"])-86400000)
         url="https://lichess.org/api/games/user/"+quote(username,safe="")
         latest=int(account["cursor"] or 0)
-        with client.stream("GET",url,params=params,headers={"Accept":"application/x-ndjson"}) as response:
-            response.raise_for_status()
-            for line in response.iter_lines():
-                if not line.strip(): continue
-                item=json.loads(line)
-                if item.get("variant")!="standard": continue
-                ts=item.get("createdAt")
-                ingest(item["pgn"],item["id"],{"played_at":iso(ts/1000) if ts is not None else None,"speed":item.get("speed"),"opening":item.get("opening",{}).get("name"),"termination":item.get("status")})
-                latest=max(latest,ts or 0)
+        for attempt in range(4):
+            try:
+                with client.stream("GET",url,params=params,headers={"Accept":"application/x-ndjson"}) as response:
+                    if response.status_code in (429,500,502,503,504) and attempt<3:
+                        delay=retry_delay(response.headers,attempt)
+                    else:
+                        response.raise_for_status()
+                        for line in response.iter_lines():
+                            if not line.strip(): continue
+                            try:
+                                item=json.loads(line)
+                                if item.get("variant")!="standard": continue
+                                ts=item.get("createdAt")
+                                ingest(item["pgn"],item["id"],{"played_at":iso(ts/1000) if ts is not None else None,"speed":item.get("speed"),"opening":(item.get("opening") or {}).get("name"),"termination":item.get("status")})
+                                latest=max(latest,ts or 0)
+                            except (ValueError,TypeError,KeyError,AttributeError) as exc:
+                                errors.append({"error":"Registro Lichess inválido: "+str(exc)})
+                        break
+                time.sleep(delay)
+            except httpx.TransportError:
+                if attempt==3: raise
+                time.sleep(2**attempt)
         if not errors:
             with connect() as c: c.execute("UPDATE accounts SET cursor=? WHERE id=?",(str(latest),account["id"]))
     return {"added":added,"skipped":skipped,"errors":errors}
