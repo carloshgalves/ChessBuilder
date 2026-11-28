@@ -44,7 +44,7 @@ def summarize(analyses):
         result[color]={"accuracy":mean([m["accuracy"] for m in vals]),"acpl":mean([m["cp_loss"] for m in vals if m["cp_loss"] is not None]),"expected_score_loss":mean([m["expected_score_loss"] for m in vals if m["expected_score_loss"] is not None]),"analysed":len(vals)}
     return result
 
-JOB_ORDER="CASE WHEN "+complete_sql()+" THEN 0 ELSE 1 END, "+saved_sql()+" DESC, CASE json_extract(j.settings,'$.level') WHEN 'detailed' THEN 2 WHEN 'deep' THEN 1 ELSE 0 END DESC, j.id DESC"
+JOB_ORDER="CASE WHEN "+complete_sql()+" THEN 0 ELSE 1 END, "+saved_sql()+" DESC, CASE json_extract(j.settings,'$.level') WHEN 'detailed' THEN 2 WHEN 'deep' THEN 1 ELSE 0 END DESC, CASE COALESCE(json_extract(j.settings,'$.search_policy'),'classic') WHEN 'classic' THEN 0 ELSE 1 END, j.id DESC"
 def select_job(c,gid):
     return c.execute("SELECT j.* FROM jobs j WHERE j.game_id=? AND "+saved_sql()+">0 ORDER BY "+JOB_ORDER+" LIMIT 1",(gid,)).fetchone()
 
@@ -103,13 +103,17 @@ def line(board,pv):
     return result
 
 @router.get("/games/{game_id}")
-def detail(game_id:int):
+def detail(game_id:int,job_id:int|None=None):
     with connect() as c:
         c.execute("BEGIN")
         game=c.execute("SELECT * FROM games WHERE id=?",(game_id,)).fetchone()
         if not game: raise HTTPException(404,"Partida não encontrada")
         moves=[dict(r) for r in c.execute("SELECT * FROM moves WHERE game_id=? ORDER BY ply",(game_id,))]
         job=select_job(c,game_id)
+        available=[dict(j) for j in c.execute("SELECT j.id,j.settings,j.status,"+saved_sql()+" AS saved FROM jobs j WHERE j.game_id=? AND "+saved_sql()+">0 ORDER BY "+JOB_ORDER,(game_id,))]
+        if job_id is not None:
+            job=c.execute("SELECT j.* FROM jobs j WHERE j.game_id=? AND j.id=? AND "+saved_sql()+">0",(game_id,job_id)).fetchone()
+            if not job:raise HTTPException(404,"Análise salva não encontrada nesta partida")
         analyses=get_analyses(c,job)
         active=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
         latest=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
@@ -128,7 +132,7 @@ def detail(game_id:int):
             move["played_line"]=line(board,a["played"]["pv"])
             move["variations"]=[line(board,v["pv"]) for v in a["alternatives"]]
         board.push_uci(move["uci"])
-    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION,"timing":timing,"coverage":{"saved":len(analyses),"total":len(moves),"status":"no_moves" if not moves else "complete" if len(analyses)==len(moves) else "partial" if analyses else "unanalysed"},"active_job":dict(active) if active else None,"latest_job":dict(latest) if latest else None}
+    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"available_jobs":available,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION,"timing":timing,"coverage":{"saved":len(analyses),"total":len(moves),"status":"no_moves" if not moves else "complete" if len(analyses)==len(moves) else "partial" if analyses else "unanalysed"},"active_job":dict(active) if active else None,"latest_job":dict(latest) if latest else None}
 
 @router.get("/games/{game_id}/pgn",response_class=PlainTextResponse)
 def export(game_id:int):

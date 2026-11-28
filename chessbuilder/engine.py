@@ -70,16 +70,17 @@ def search(engine,board,settings,engine_id,root=None,multipv=1):
     with connect() as c: c.execute("INSERT OR REPLACE INTO evaluations VALUES(?,?)",(key,json.dumps(result)))
     return result
 
-def search_move(engine,board,move,settings,engine_id):
+def search_move(engine,board,move,settings,engine_id,search_fn=None):
+    query=search_fn or search
     if settings.search_policy=="compact-v1":
-        alternatives=search(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count()))
+        alternatives=query(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count()))
         best=alternatives[0]
         played=next((candidate for candidate in alternatives if candidate["pv"] and candidate["pv"][0]==move.uci()),None)
-        if played is None:played=search(engine,board,settings,engine_id,root=move)[0]
+        if played is None:played=query(engine,board,settings,engine_id,root=move)[0]
     else:
-        best=search(engine,board,settings,engine_id)[0]
-        played=best if best["pv"] and best["pv"][0]==move.uci() else search(engine,board,settings,engine_id,root=move)[0]
-        alternatives=search(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count())) if settings.multipv>1 else [best]
+        best=query(engine,board,settings,engine_id)[0]
+        played=best if best["pv"] and best["pv"][0]==move.uci() else query(engine,board,settings,engine_id,root=move)[0]
+        alternatives=query(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count())) if settings.multipv>1 else [best]
     return {"engine":engine_id,"settings":persisted_settings(settings),"perspective":"white" if board.turn else "black","best":best,"played":played,"alternatives":alternatives}
 
 def estimated_chance(score):

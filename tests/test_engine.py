@@ -183,3 +183,16 @@ def test_completed_classic_does_not_hide_compact_request(tmp_path,monkeypatch):
         c.execute("UPDATE jobs SET status='done'")
     assert preview(QueueRequest(search_policy="compact-v1"))["eligible"]==1
     assert preview(QueueRequest())["excluded"]=={"completed":1}
+
+def test_review_prefers_classic_at_equal_depth_but_allows_explicit_compact(tmp_path,monkeypatch):
+    from chessbuilder.review import detail
+    from chessbuilder.engine import settings_json
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
+    with connect() as c:
+        for policy in ("classic","compact-v1"):
+            jid=c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,'done',2)",(settings_json(Settings(search_policy=policy)),)).lastrowid
+            persist_fixture(c,jid,1)
+    assert detail(1)["job"]["id"]==1
+    selected=detail(1,job_id=2)
+    assert selected["job"]["id"]==2 and len(selected["available_jobs"])==2
