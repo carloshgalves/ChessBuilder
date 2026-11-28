@@ -158,7 +158,7 @@ def enqueue(body:QueueRequest):
     settings=settings_json(Settings.model_validate(body.model_dump()))
     with connect() as c:
         if body.game_id is not None and not c.execute("SELECT 1 FROM games WHERE id=?",(body.game_id,)).fetchone(): raise HTTPException(404,"Partida não encontrada")
-        c.execute("INSERT OR IGNORE INTO jobs(game_id,settings,status,priority) SELECT id,?,'queued',? FROM games WHERE (? IS NULL OR id=?)",(settings,int(body.game_id is not None),body.game_id,body.game_id))
+        c.execute("INSERT OR IGNORE INTO jobs(game_id,settings,status,priority) SELECT id,?,'queued',? FROM games WHERE (? IS NULL OR id=?) AND (? IS NOT NULL OR source!='historical')",(settings,int(body.game_id is not None),body.game_id,body.game_id,body.game_id))
         queued=c.execute("SELECT changes()").fetchone()[0]
         if body.game_id is not None:
             c.execute("UPDATE jobs SET priority=1 WHERE game_id=? AND settings=? AND status='queued'",(body.game_id,settings))

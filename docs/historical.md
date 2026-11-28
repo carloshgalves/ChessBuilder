@@ -1,0 +1,2 @@
+# Historical corpus
+Catalog identifiers are from PGN Mentor's World Championships index (https://www.pgnmentor.com/files.html). Downloads are user-initiated and local; no external corpus is committed. Import deduplicates moves, players, start position and result. Missing game counts are null unless an expected count is supplied. Master recall is distinct from engine-approved lines. The catalog is not evidence of a fully imported or independently audited corpus.

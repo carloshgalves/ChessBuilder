@@ -51,3 +51,6 @@ app.include_router(repertoire_router)
 
 from chessbuilder.repetition import router as repetition_router
 app.include_router(repetition_router)
+
+from chessbuilder.historical import router as historical_router
+app.include_router(historical_router)

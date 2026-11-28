@@ -44,7 +44,7 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 4:
+        if version > 5:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
@@ -54,6 +54,8 @@ def migrate(path=None):
             conn.executescript("BEGIN IMMEDIATE;"+COACH_SCHEMA+"PRAGMA user_version=3; COMMIT;")
         if version < 4:
             conn.executescript("BEGIN IMMEDIATE;"+REPETITION_SCHEMA+"PRAGMA user_version=4; COMMIT;")
+        if version < 5:
+            conn.executescript("BEGIN IMMEDIATE;"+HISTORICAL_SCHEMA+"PRAGMA user_version=5; COMMIT;")
 
 TRAINING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_items(
@@ -104,4 +106,9 @@ CREATE TABLE IF NOT EXISTS wood_cycle_items(
  item_id INTEGER NOT NULL REFERENCES training_items(id), attempt_id INTEGER UNIQUE REFERENCES training_attempts(id),
  PRIMARY KEY(cycle_id,ordinal), UNIQUE(cycle_id,item_id));
 CREATE INDEX IF NOT EXISTS review_due ON review_schedule(due_at);
+"""
+
+HISTORICAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS historical_corpora(id INTEGER PRIMARY KEY, edition TEXT NOT NULL, provenance TEXT NOT NULL, expected_games INTEGER, UNIQUE(edition,provenance));
+CREATE TABLE IF NOT EXISTS historical_entries(corpus_id INTEGER NOT NULL REFERENCES historical_corpora(id), game_id INTEGER NOT NULL REFERENCES games(id), event TEXT, round TEXT, PRIMARY KEY(corpus_id,game_id));
 """
