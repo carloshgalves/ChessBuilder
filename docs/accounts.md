@@ -1,0 +1,2 @@
+# Account identity
+A game remains unique by source and external ID. game_accounts links each imported account to the game and its color. Migration backfills existing links and same-platform exact player-name matches. Explicit account filters use these links and account-filtered dashboard summaries use the matching side. Unfiltered personal diagnostics retain the primary stored perspective to avoid double counting. Queue jobs are shared by game and engine settings; the job list is paginated on the server. Global controls remain explicitly global.

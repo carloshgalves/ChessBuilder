@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 import chess
 import chess.engine
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from chessbuilder.db import connect
 from chessbuilder.importer import context_key
@@ -175,7 +175,7 @@ def scope_where(body,alias="g"):
     for key in ("account_id","source","speed"):
         value=getattr(body,key)
         if value is not None:
-            clauses.append(f"{alias}.{key}=?");args.append(value)
+            clauses.append(f"EXISTS(SELECT 1 FROM game_accounts ga WHERE ga.game_id={alias}.id AND ga.account_id=?)" if key=="account_id" else f"{alias}.{key}=?");args.append(value)
     if body.start:
         clauses.append(f"{alias}.played_at>=?");args.append(body.start.isoformat())
     if body.end:
@@ -254,11 +254,19 @@ def bulk_control(body:BulkRequest):
         return {"changed":c.execute("SELECT changes()").fetchone()[0],"status":target}
 
 @router.get("/analysis/jobs")
-def jobs():
+def jobs(status:Literal["queued","running","paused","done","failed","cancelled"]|None=None,account_id:int|None=None,
+         limit:int=Query(50,ge=1,le=200),offset:int=Query(0,ge=0)):
+    clauses,args=scope_where(Scope(account_id=account_id))
+    if status:clauses.append("j.status=?");args.append(status)
+    where=" WHERE "+" AND ".join(clauses) if clauses else ""
+    join=" FROM jobs j JOIN games g ON g.id=j.game_id"
     with connect() as c:
-        rows=c.execute("SELECT j.*,g.white,g.black,g.account_id,g.source,g.speed,g.played_at,(SELECT COUNT(*) FROM moves m WHERE m.game_id=j.game_id) AS total_plies FROM jobs j JOIN games g ON g.id=j.game_id ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'paused' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,j.priority DESC,g.played_at DESC,j.id DESC LIMIT 200").fetchall()
+        c.execute("BEGIN")
+        total=c.execute("SELECT COUNT(*)"+join+where,args).fetchone()[0]
+        rows=c.execute("SELECT j.*,g.white,g.black,g.account_id,g.source,g.speed,g.played_at,(SELECT COUNT(*) FROM moves m WHERE m.game_id=j.game_id) AS total_plies"+join+where+
+            " ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'paused' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,j.priority DESC,g.played_at DESC,j.id DESC LIMIT ? OFFSET ?",(*args,limit,offset)).fetchall()
         counts={r[0]:r[1] for r in c.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status")}
-        return {"engine_available":bool(executable()),"temperatures_c":temperatures(),"counts":counts,"jobs":[dict(r) for r in rows]}
+        return {"engine_available":bool(executable()),"temperatures_c":temperatures(),"counts":counts,"total":total,"offset":offset,"limit":limit,"jobs":[dict(r) for r in rows]}
 
 @router.post("/analysis/jobs/{job_id}/{action}")
 def control(job_id:int,action:str):

@@ -51,8 +51,13 @@ def get_analyses(c,job):
 
 def filters(source=None,speed=None,color=None,result=None,opening=None,search=None,start=None,end=None,status=None,account_id=None):
     clauses=[];args=[]
-    for column,value in (("source",source),("speed",speed),("player_color",color),("result",result),("account_id",account_id)):
+    for column,value in (("source",source),("speed",speed),("result",result)):
         if value is not None and value!="": clauses.append("g."+column+"=?");args.append(value)
+    if color:
+        if account_id is None:clauses.append("g.player_color=?");args.append(color)
+        else:clauses.append("EXISTS(SELECT 1 FROM game_accounts gc WHERE gc.game_id=g.id AND gc.account_id=? AND gc.player_color=?)");args.extend([account_id,color])
+    if account_id is not None:
+        clauses.append("EXISTS(SELECT 1 FROM game_accounts ga WHERE ga.game_id=g.id AND ga.account_id=?)");args.append(account_id)
     if opening:
         clauses.append("(g.opening LIKE ? OR g.eco LIKE ?)");args.extend(["%"+opening+"%"]*2)
     if search:
@@ -68,7 +73,11 @@ def games(source:str|None=None,speed:str|None=None,color:str|None=None,result:st
     where,args=filters(source,speed,color,result,opening,search,start,end,status,account_id)
     with connect() as c:
         rows=c.execute("SELECT g.id,g.source,g.played_at,g.speed,g.white,g.black,g.white_rating,g.black_rating,g.result,g.player_color,g.opening,g.eco,(SELECT status FROM jobs j WHERE j.game_id=g.id ORDER BY "+JOB_ORDER+" LIMIT 1) AS analysis_status FROM games g"+where+" ORDER BY g.played_at DESC,g.id DESC LIMIT ? OFFSET ?",(*args,limit,offset))
-        return [dict(r) for r in rows]
+        result=[dict(r) for r in rows]
+        if account_id is not None:
+            for r in result:
+                r["player_color"]=c.execute("SELECT player_color FROM game_accounts WHERE game_id=? AND account_id=?",(r["id"],account_id)).fetchone()[0]
+        return result
 
 def line(board,pv):
     b=board.copy()

@@ -60,6 +60,11 @@ def opening_name(value):
         return unquote(parsed.path.split("/openings/",1)[1]).replace("-"," ")
     return value
 
+def link_account(conn,gid,account,color):
+    if account is not None:
+        conn.execute("""INSERT INTO game_accounts(game_id,account_id,player_color) VALUES(?,?,?)
+            ON CONFLICT(game_id,account_id) DO UPDATE SET player_color=COALESCE(game_accounts.player_color,excluded.player_color)""",(gid,account,color))
+
 def store(game,raw,source="pgn",external_id=None,account=None,username=None,meta=None):
     if game.errors:
         raise ValueError("PGN inválido: "+str(game.errors[0]))
@@ -79,12 +84,14 @@ def store(game,raw,source="pgn",external_id=None,account=None,username=None,meta
         conn.execute("BEGIN IMMEDIATE")
         existing=conn.execute("SELECT id,player_color,account_id FROM games WHERE source=? AND external_id=?",(source,external_id)).fetchone()
         if existing:
+            link_account(conn,existing["id"],account,color)
             if existing["player_color"] is None and color is not None:
                 conn.execute("UPDATE games SET player_color=?,account_id=COALESCE(account_id,?) WHERE id=?",(color,account,existing["id"]))
             return False
         cur=conn.execute("""INSERT INTO games(source,external_id,account_id,played_at,speed,white,black,white_rating,black_rating,result,player_color,opening,eco,termination,initial_fen,pgn,time_control) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (source,external_id,account,meta.get("played_at") or game_date(h),meta.get("speed") or speed(control),white,black,integer(h.get("WhiteElo")),integer(h.get("BlackElo")),h.get("Result","*"),color,h.get("Opening") or opening_name(meta.get("opening") or h.get("ECOUrl")),h.get("ECO"),meta.get("termination") or h.get("Termination"),initial,raw,control))
         game_id=cur.lastrowid
+        link_account(conn,game_id,account,color)
         for ply,node in enumerate(game.mainline(),1):
             fen=board.fen()
             key=context_key(board)
@@ -99,6 +106,11 @@ def account_id(source,username):
     with connect() as c:
         c.execute("INSERT OR IGNORE INTO accounts(source,username) VALUES(?,?)",(source,username))
         row=c.execute("SELECT * FROM accounts WHERE source=? AND username=?",(source,username)).fetchone()
+        # A newly registered account can already occur in the opposite seat of
+        # a previously imported game; link it without importing a duplicate.
+        c.execute("""INSERT OR IGNORE INTO game_accounts(game_id,account_id,player_color)
+            SELECT id,?,CASE WHEN white=? COLLATE NOCASE THEN 'white' ELSE 'black' END
+            FROM games WHERE source=? AND (white=? COLLATE NOCASE OR black=? COLLATE NOCASE)""",(row["id"],username,source,username,username))
         return dict(row)
 
 def retry_delay(headers,attempt):

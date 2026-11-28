@@ -98,3 +98,16 @@ def test_skip_completed_and_explicit_reanalysis(tmp_path,monkeypatch):
     assert preview(QueueRequest(level="deep"))["eligible"]==0
     assert enqueue(QueueRequest(game_id=1,level="deep"))["queued"]==1
     assert enqueue(QueueRequest(game_id=1,level="deep"))["queued"]==0
+
+def test_job_pagination_and_account_filter(tmp_path,monkeypatch):
+    from chessbuilder.engine import jobs,preview
+    from chessbuilder.importer import account_id
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    a=account_id("chess.com","Alice")["id"]
+    for i in range(4):
+        g,p=next(parse('[White "Alice"]\n[Black "Bob"]\n[Result "*"]\n\n1. e4 *'))
+        store(g,p,"chess.com",str(i),a,"Alice")
+    enqueue(QueueRequest(limit=3))
+    assert jobs(status="queued",account_id=a,limit=2,offset=0)["total"]==3
+    assert len(jobs(status="queued",account_id=a,limit=2,offset=2)["jobs"])==1
+    assert jobs(status="done",limit=2,offset=0)["total"]==0
