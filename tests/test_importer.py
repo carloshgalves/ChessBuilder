@@ -59,3 +59,36 @@ def test_reimport_assigns_missing_player_and_normalizes_opening(tmp_path,monkeyp
     with connect() as c:
         row=c.execute("SELECT player_color,opening FROM games").fetchone()
         assert tuple(row)==("white","Caro Kann Defense")
+
+def test_chess_com_mixed_case_reuses_account_and_follows_redirect(tmp_path,monkeypatch):
+    from chessbuilder.importer import account_id
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    original=account_id("chess.com","Alice")
+    archive="https://api.chess.com/pub/player/alice/games/2024/01"
+    requests=[]
+    def handle(r):
+        requests.append(str(r.url))
+        assert "/Alice/" not in r.url.path
+        if r.url.path.endswith("/archives"):
+            return httpx.Response(301,headers={"Location":"/pub/player/alice/games/canonical-archives"})
+        if r.url.path.endswith("/canonical-archives"):
+            return httpx.Response(200,json={"archives":[archive]})
+        return httpx.Response(200,json={"games":[{"pgn":PGN,"url":"https://www.chess.com/game/live/1","rules":"chess"}]})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        assert sync("chess.com","ALICE",client)["added"]==1
+    assert len(requests)==3
+    with connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM accounts").fetchone()[0]==1
+        assert c.execute("SELECT account_id FROM games").fetchone()[0]==original["id"]
+
+def test_chess_com_rejects_external_redirect(tmp_path,monkeypatch):
+    import pytest
+    from chessbuilder.importer import request
+    calls=[]
+    def handle(r):
+        calls.append(str(r.url))
+        return httpx.Response(301,headers={"Location":"https://example.org/archives"})
+    with httpx.Client(transport=httpx.MockTransport(handle)) as client:
+        with pytest.raises(ValueError,match="Redirecionamento externo"):
+            request(client,"https://api.chess.com/pub/player/alice/games/archives")
+    assert len(calls)==1
