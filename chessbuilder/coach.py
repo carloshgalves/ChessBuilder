@@ -12,7 +12,8 @@ from chessbuilder.tactics import diagnose,phase
 from chessbuilder.training import now,public_item
 
 router=APIRouter(prefix="/api/coach")
-VERSION="coach-v1"
+VERSION="coach-v2"
+from chessbuilder.adaptive import practice_profile,practice_signal,position_key
 MIN_SAMPLE=8
 
 def wilson(fail,n):
@@ -157,7 +158,7 @@ def report(speed:str|None=None,days:int=Query(30,ge=1,le=3650),limit:int=Query(1
             p=old_by.get((r["theme"],r["phase"],r["speed"]))
             if p and min(p["opportunities"],r["opportunities"])>=MIN_SAMPLE:
                 changes.append({"theme":r["theme"],"phase":r["phase"],"speed":r["speed"],"current_n":r["opportunities"],"previous_n":p["opportunities"],"failure_rate_change":round(r["failure_rate"]-p["failure_rate"],4)})
-        return {"version":VERSION,"period":{"mode":mode,"start":start.isoformat() if mode=="period" else None,"end":last.isoformat(),"limit":limit,"speed":speed},"coverage":coverage,"previous_coverage":previous_coverage,"competencies":competencies,"phases":phase_summary(current),"previous_phases":phase_summary(previous),"changes":changes,"strengths":[r for r in competencies if r["confidence"]=="observed" and r["interval"][1]<=0.35],"weaknesses":[r for r in competencies if r["confidence"]=="observed" and r["interval"][0]>=0.25],"practice":attempt_stats(c),"transfer":competitive_transfer(c,current+previous)}
+        return {"version":VERSION,"period":{"mode":mode,"start":start.isoformat() if mode=="period" else None,"end":last.isoformat(),"limit":limit,"speed":speed},"coverage":coverage,"previous_coverage":previous_coverage,"competencies":competencies,"phases":phase_summary(current),"previous_phases":phase_summary(previous),"changes":changes,"strengths":[r for r in competencies if r["confidence"]=="observed" and r["interval"][1]<=0.35],"weaknesses":[r for r in competencies if r["confidence"]=="observed" and r["interval"][0]>=0.25],"practice":attempt_stats(c),"adaptive_practice":practice_profile(c,last),"transfer":competitive_transfer(c,current+previous)}
 
 class PlanRequest(BaseModel):
     minutes:int=Field(default=20,ge=5,le=180)
@@ -169,7 +170,11 @@ def select_plan(c,body,day):
     current,_=game_observations(c,read_games(c,body.speed,(day-timedelta(days=29)).isoformat(),day.isoformat(),100))
     priorities=aggregate(current,day)
     priority=defaultdict(float)
-    for r in priorities:priority[r["theme"]]=max(priority[r["theme"]],r["priority"])
+    for r in priorities:
+        key=(r["theme"],r["phase"])
+        priority[key]=max(priority[key],r["priority"])
+    profiles=practice_profile(c,day)
+    seen_practice={position_key(r[0]) for r in c.execute("""SELECT DISTINCT t.fen FROM training_attempts a JOIN training_items t ON t.id=a.item_id WHERE a.finished_at IS NOT NULL AND substr(a.finished_at,1,10)<=?""",(day.isoformat(),))}
     from chessbuilder.repetition import sync_reviews
     sync_reviews(c)
     candidates=c.execute("""SELECT t.*,g.speed AS game_speed,s.due_at AS scheduled_due,
@@ -183,17 +188,28 @@ def select_plan(c,body,day):
         last=date.fromisoformat(r["last_attempt"][:10]) if r["last_attempt"] else None
         due=bool(r["scheduled_due"] and r["scheduled_due"][:10]<=day.isoformat()) if r["scheduled_due"] else bool(last and (day-last).days>=(3 if r["last_correct"] else 1))
         if last and not due:continue
+        # A duplicate position from a different source is not novel practice.
+        if not last and position_key(r["fen"]) in seen_practice:continue
         goal_match=body.goal=="general" or body.goal=="tactics" and any(t!="unclassified" for t in themes) or body.goal==r["kind"]
-        score=(max([priority[t] for t in themes] or [0])+ (8 if due else 3)+(4 if goal_match else 0))
-        ranking.append((r,minutes,score,due,themes))
+        weakness=max([priority[(t,r["phase"])] for t in themes] or [0])
+        practice,reasons=practice_signal(r,profiles)
+        if weakness>0:reasons.insert(0,"Prioridade competitiva observada na fase "+r["phase"])
+        if due:reasons.insert(0,"Revisão programada")
+        if not last and r["source"]=="lichess" and weakness>0:
+            practice+=2;reasons.append("Posição externa para praticar o tema")
+        score=min(20,weakness)+(8 if due else 3)+(4 if goal_match else 0)+practice
+        ranking.append((r,minutes,score,due,themes,reasons))
     selected=[];remaining=body.minutes;used=defaultdict(int);seen_positions=set()
     while ranking:
         affordable=[x for x in ranking if x[1]<=remaining and " ".join(x[0]["fen"].split()[:4]) not in seen_positions]
         if not affordable:break
-        best=max(affordable,key=lambda x:(x[2]-2*min([used[t] for t in x[4]] or [0]),-x[0]["id"]))
-        ranking.remove(best);r,m,score,due,themes=best
+        # Prioritize at least one due review when one fits; afterwards rank
+        # by evidence and diversity rather than spending the entire plan on repetitions.
+        due_first=[x for x in affordable if x[3]] if not selected else []
+        best=max(due_first or affordable,key=lambda x:(x[2]-2*max([used[t] for t in x[4]] or [0]),-x[0]["id"]))
+        ranking.remove(best);r,m,score,due,themes,reasons=best
         seen_positions.add(" ".join(r["fen"].split()[:4]))
-        selected.append({"item_id":r["id"],"minutes":m,"reason":"review_due" if due else "new_practice","themes":themes,"priority":round(score,2)})
+        selected.append({"item_id":r["id"],"minutes":m,"reason":"review_due" if due else "new_practice","themes":themes,"priority":round(score,2),"reasons":reasons,"phase":r["phase"],"source":r["source"],"difficulty":r["difficulty"]})
         for t in themes:used[t]+=1
         remaining-=m
     return {"version":VERSION,"goal":body.goal,"minutes":body.minutes,"allocated":body.minutes-remaining,"unallocated":remaining,"items":selected,"roadmap":[{"theme":r["theme"],"phase":r["phase"],"speed":r["speed"],"priority":r["priority"],"opportunities":r["opportunities"],"examples":r["examples"]} for r in priorities[:5]]}
