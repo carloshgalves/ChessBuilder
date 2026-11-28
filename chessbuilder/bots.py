@@ -203,4 +203,4 @@ def save(gid:int):
     return {"game_id":rid}
 @router.get("/calibration")
 def calibration():
-    with connect() as c:return {"calibrated":False,"reports":[dict(r) for r in c.execute("SELECT * FROM bot_calibration ORDER BY id DESC LIMIT 50")],"note":"Não existem faixas empiricamente certificadas até executar o benchmark de referência."}
+    with connect() as c:return {"calibrated":False,"reports":[{**dict(r),"config":json.loads(r["config"]),"result":json.loads(r["result"])} for r in c.execute("SELECT * FROM bot_calibration ORDER BY id DESC LIMIT 50")],"note":"Não existem faixas empiricamente certificadas até executar o benchmark de referência."}
