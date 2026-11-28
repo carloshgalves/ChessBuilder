@@ -62,3 +62,39 @@ def test_checkpoint_restarts_for_changed_engine(tmp_path,monkeypatch):
     with connect() as c:
         assert c.execute("SELECT COUNT(*) FROM move_analysis").fetchone()[0]==0
         assert c.execute("SELECT next_ply FROM jobs").fetchone()[0]==1
+
+def test_selective_batch_and_bulk_pause(tmp_path,monkeypatch):
+    from chessbuilder.engine import preview,bulk_control,BulkRequest
+    from chessbuilder.importer import account_id
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    aa=account_id("chess.com","Alice")["id"];bb=account_id("lichess","Bob")["id"]
+    for i,(account,source,speed,day) in enumerate([(aa,"chess.com","rapid","2026-01-01"),(aa,"chess.com","rapid","2026-01-02"),(aa,"chess.com","rapid","2026-01-03"),(aa,"chess.com","blitz","2026-01-03"),(bb,"lichess","rapid","2026-01-02"),(aa,"chess.com","rapid","2025-12-31")]):
+        g,p=next(parse('[White "Alice"]\n[Black "Bob"]\n[Result "*"]\n\n1. e4 e5 *'))
+        store(g,p,source,str(i),account,meta={"speed":speed,"played_at":day+"T23:59:59+00:00"})
+    q=QueueRequest(account_id=aa,speed="rapid",start="2026-01-01",end="2026-01-03",limit=2)
+    p=preview(q)
+    assert (p["matched"],p["eligible"],p["selected"])==(3,3,2)
+    assert [x["id"] for x in p["sample"]]==[3,2]
+    with connect() as c:assert c.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]==0
+    assert enqueue(q)["queued"]==2
+    assert enqueue(q)["queued"]==1
+    assert enqueue(q)["queued"]==0
+    job=Worker().claim()
+    with connect() as c:c.execute("UPDATE jobs SET next_ply=2 WHERE id=?",(job["id"],))
+    assert bulk_control(BulkRequest(action="pause",all_jobs=True))["changed"]==3
+    r=enqueue(q.model_copy(update={"limit":1}))
+    assert r["resumed"]==1 and r["queued"]==0
+    with connect() as c:
+        assert c.execute("SELECT next_ply,status FROM jobs WHERE id=?",(job["id"],)).fetchone()[:]==(2,"queued")
+        assert c.execute("SELECT COUNT(*) FROM jobs WHERE status='paused'").fetchone()[0]==2
+    assert bulk_control(BulkRequest(action="cancel",account_id=aa,speed="rapid"))["changed"]==3
+
+def test_skip_completed_and_explicit_reanalysis(tmp_path,monkeypatch):
+    from chessbuilder.engine import preview
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
+    enqueue(QueueRequest())
+    with connect() as c:c.execute("UPDATE jobs SET status='done',next_ply=2")
+    assert preview(QueueRequest(level="deep"))["eligible"]==0
+    assert enqueue(QueueRequest(game_id=1,level="deep"))["queued"]==1
+    assert enqueue(QueueRequest(game_id=1,level="deep"))["queued"]==0
