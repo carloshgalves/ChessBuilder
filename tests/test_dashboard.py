@@ -32,3 +32,10 @@ def test_unowned_games_and_zero_loss(tmp_path,monkeypatch):
     assert s["total"]==2 and s["personal_games"]==1 and s["completed_personal_games"]==1
     assert not s["gaps"] and sum(x["games"] for x in s["months"])==1
     assert s["accuracy"]["all"]==100 and s["worst_move"] is None
+
+def test_historical_games_excluded_from_default_dashboard(tmp_path,monkeypatch):
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse(game("1-0","2024.01.01",1700,1800)));store(g,p,username="Alice")
+    store(g,p,"historical","champion-fixture")
+    assert dashboard()["total"]==1
+    assert dashboard(source="historical")["total"]==1
