@@ -66,7 +66,7 @@ def run(profile,strength,reference_elo,games,seed,max_plies,resume=None):
             outcome=b.outcome(claim_draw=True)
             result="*" if not outcome else "draw" if outcome.winner is None else "win" if outcome.winner==color else "loss"
             game=chess.pgn.Game.from_board(b);game.headers["Result"]=outcome.result() if outcome else "*"
-            records.append({"seed":seed+i//2,"color":"white" if color else "black","result":result,"plies":len(b.move_stack),"policy_moves":moves,"captures":captures,"checks":checks,"candidate_cp_loss":loss,"pgn":str(game)})
+            records.append({"seed":seed+(i//2)*1000,"color":"white" if color else "black","result":result,"plies":len(b.move_stack),"policy_moves":moves,"captures":captures,"checks":checks,"candidate_cp_loss":loss,"pgn":str(game)})
             with connect() as c:
                 c.execute("BEGIN IMMEDIATE")
                 old=json.loads(c.execute("SELECT result FROM bot_calibration WHERE id=?",(rid,)).fetchone()[0])
