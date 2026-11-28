@@ -93,6 +93,7 @@ def detail(game_id:int):
         job=select_job(c,game_id)
         analyses=get_analyses(c,job)
     from chessbuilder.tactics import diagnose
+    from chessbuilder.strategy import diagnose_strategy
     board=chess.Board(game["initial_fen"])
     for move in moves:
         a=analyses.get(move["ply"])
@@ -100,6 +101,7 @@ def detail(game_id:int):
         if a:
             move["metrics"]=metrics(a)
             move["diagnosis"]=diagnose(board,chess.Move.from_uci(move["uci"]),a)
+            move["strategy"]=diagnose_strategy(board,chess.Move.from_uci(move["uci"]),a)
             move["best_line"]=line(board,a["best"]["pv"])
             move["played_line"]=line(board,a["played"]["pv"])
             move["variations"]=[line(board,v["pv"]) for v in a["alternatives"]]
