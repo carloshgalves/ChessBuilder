@@ -4,6 +4,7 @@ import chess
 from fastapi import APIRouter,HTTPException,Query
 from fastapi.responses import PlainTextResponse
 from chessbuilder.db import connect
+from chessbuilder.replay_timing import annotate_timing
 from chessbuilder.integrity import saved_sql,total_sql,complete_sql,valid_sql
 router=APIRouter(prefix="/api")
 
@@ -112,6 +113,7 @@ def detail(game_id:int):
         analyses=get_analyses(c,job)
         active=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
         latest=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
+    timing=annotate_timing(game,moves)
     from chessbuilder.tactics import diagnose
     from chessbuilder.strategy import diagnose_strategy
     board=chess.Board(game["initial_fen"])
@@ -126,7 +128,7 @@ def detail(game_id:int):
             move["played_line"]=line(board,a["played"]["pv"])
             move["variations"]=[line(board,v["pv"]) for v in a["alternatives"]]
         board.push_uci(move["uci"])
-    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION,"coverage":{"saved":len(analyses),"total":len(moves),"status":"no_moves" if not moves else "complete" if len(analyses)==len(moves) else "partial" if analyses else "unanalysed"},"active_job":dict(active) if active else None,"latest_job":dict(latest) if latest else None}
+    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION,"timing":timing,"coverage":{"saved":len(analyses),"total":len(moves),"status":"no_moves" if not moves else "complete" if len(analyses)==len(moves) else "partial" if analyses else "unanalysed"},"active_job":dict(active) if active else None,"latest_job":dict(latest) if latest else None}
 
 @router.get("/games/{game_id}/pgn",response_class=PlainTextResponse)
 def export(game_id:int):

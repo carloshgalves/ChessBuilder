@@ -130,3 +130,7 @@ Na aba Análise, selecione conta, origem, ritmo, período e tamanho do lote (pad
 ### Integridade da análise
 
 O progresso é medido por avaliações efetivamente gravadas em SQLite, associadas aos lances importados. Na inicialização, jobs marcados como concluídos sem cobertura integral voltam a pausado (ou falho se o PGN não tiver lances), sem iniciar automaticamente novas análises. Históricos vazios são reconstruídos a partir de PGNs locais compatíveis quando contêm lances. Registros genuinamente sem lances são preservados e identificados como não analisáveis. A retomada confere a identidade do motor; uma mudança de motor exige nova cobertura para evitar misturar avaliações incompatíveis.
+
+### Replay e relógios
+
+A revisão usa a disposição de jogadores, relógios e linhas pareadas adaptada do ChessCupMotorSimulation. Ratings são os registrados na partida. O tempo gasto usa `%emt` quando disponível; caso contrário, para controle simples de incremento Fischer, estima pela diferença entre dois relógios consecutivos do mesmo jogador mais incremento. O primeiro lance de cada lado, lacunas, controles por etapas e partidas por correspondência não recebem estimativa. Nenhum relógio ausente é substituído por zero. Os PGNs já importados são suficientes, sem migração ou nova análise.
