@@ -41,7 +41,10 @@ def test_review_prefers_deeper_complete_job(tmp_path,monkeypatch):
     g,p=next(parse('[Result "*"]\n\n1. e4 e5 *'));store(g,p)
     with connect() as c:
         for level,status,next_ply in [("deep","done",3),("quick","done",3),("detailed","running",2)]:
-            c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,?,?)",(json.dumps({"level":level}),status,next_ply))
+            jid=c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,?,?)",(json.dumps({"level":level}),status,next_ply)).lastrowid
+            for i,uci in enumerate(["e2e4","e7e5"][:next_ply-1],1):
+                score={"cp":50,"mate":None,"pv":[uci]}
+                c.execute("INSERT INTO move_analysis VALUES(?,?,?)",(jid,i,json.dumps({"perspective":"white" if i==1 else "black","best":score,"played":score,"alternatives":[score]})))
         assert json.loads(select_job(c,1)["settings"])["level"]=="deep"
         where,args=filters(status="running")
         assert not c.execute("SELECT * FROM games g"+where,args).fetchall()

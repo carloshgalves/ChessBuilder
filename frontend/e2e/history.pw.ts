@@ -15,7 +15,7 @@ test('import, dashboard and review a local game',async({page})=>{
  await expect(page.getByRole('dialog').getByRole('heading',{name:'Precisão'})).toBeVisible();
  await page.keyboard.press('Escape');
  await page.getByRole('button',{name:'Partidas',exact:true}).click();
- await page.getByRole('button',{name:'Revisar'}).click();
+ await page.getByRole('row').filter({hasText:'Alice'}).filter({hasText:'Bob'}).getByRole('button',{name:'Sem análise',exact:true}).click();
  await expect(page.getByRole('heading',{name:'Alice × Bob'})).toBeVisible();
  await page.getByRole('button',{name:'1. e4',exact:true}).click();
  await expect(page.getByRole('heading',{name:'e4',exact:true})).toBeVisible();

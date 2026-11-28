@@ -137,15 +137,19 @@ def dashboard(source:str|None=None,speed:str|None=None,account_id:int|None=None,
     a,b=parse_day(start),parse_day(end)
     if a and b and a>b:raise HTTPException(422,"Período inválido")
     where,args=filters(source=source,speed=speed,account_id=account_id,start=start,end=end)
+    def perspective(c,rows):
+        if account_id is None:return rows
+        links={r["game_id"]:r["player_color"] for r in c.execute("SELECT game_id,player_color FROM game_accounts WHERE account_id=?",(account_id,))}
+        return [{**dict(r),"account_id":account_id,"player_color":links.get(r["id"])} for r in rows]
     with connect() as c:
         c.execute("BEGIN")
         rows=c.execute("SELECT g.* FROM games g"+where+" ORDER BY g.played_at IS NULL,g.played_at,g.id",args).fetchall()
-        result=summarize_history(rows,c)
+        result=summarize_history(perspective(c,rows),c)
         if a and b:
             duration=(b-a).days+1
             prev_start=(a-timedelta(days=duration)).date().isoformat();prev_end=(a-timedelta(days=1)).date().isoformat()
             w,p=filters(source=source,speed=speed,account_id=account_id,start=prev_start,end=prev_end)
             previous=c.execute("SELECT g.* FROM games g"+w+" ORDER BY g.played_at IS NULL,g.played_at,g.id",p).fetchall()
-            s=summarize_history(previous,c)
+            s=summarize_history(perspective(c,previous),c)
             result["previous"]={"start":prev_start,"end":prev_end,"total":s["total"],"accuracy":s["accuracy"],"outcomes":s["outcomes"],"conversion":s["conversion"]}
     return result

@@ -92,3 +92,19 @@ def test_chess_com_rejects_external_redirect(tmp_path,monkeypatch):
         with pytest.raises(ValueError,match="Redirecionamento externo"):
             request(client,"https://api.chess.com/pub/player/alice/games/archives")
     assert len(calls)==1
+
+def test_shared_game_account_links(tmp_path,monkeypatch):
+    from chessbuilder.importer import account_id
+    from chessbuilder.engine import preview,QueueRequest
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    a=account_id("chess.com","Alice")["id"]
+    g,p=next(parse(PGN))
+    assert store(g,p,"chess.com","shared",a,"Alice")
+    b=account_id("chess.com","Bob")["id"]
+    assert not store(g,p,"chess.com","shared",b,"Bob")
+    with connect() as c:
+        assert c.execute("SELECT COUNT(*) FROM games").fetchone()[0]==1
+        assert [tuple(x) for x in c.execute("SELECT account_id,player_color FROM game_accounts ORDER BY account_id")]==[(a,"white"),(b,"black")]
+    assert preview(QueueRequest(account_id=a))["matched"]==1
+    assert preview(QueueRequest(account_id=b))["matched"]==1
+    migrate()

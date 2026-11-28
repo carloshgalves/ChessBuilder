@@ -126,3 +126,7 @@ Instale o Stockfish pelo gerenciador de pacotes (Debian: `sudo apt install stock
 ### Análise seletiva
 
 Na aba Análise, selecione conta, origem, ritmo, período e tamanho do lote (padrão 100). A prévia não altera a fila. Partidas com análise concluída de profundidade e cobertura iguais ou superiores são ignoradas por padrão; uma análise rápida não bloqueia uma profunda; jobs interrompidos com as mesmas configurações podem ser retomados do checkpoint. Pausar todos interrompe a fila entre lances, preservando avaliações. Selecionar novo lote não pausa os jobs existentes automaticamente. O modo de aprofundamento automático fica desativado inicialmente para reduzir o custo da análise em lote.
+
+### Integridade da análise
+
+O progresso é medido por avaliações efetivamente gravadas em SQLite, associadas aos lances importados. Na inicialização, jobs marcados como concluídos sem cobertura integral voltam a pausado (ou falho se o PGN não tiver lances), sem iniciar automaticamente novas análises. Históricos vazios são reconstruídos a partir de PGNs locais compatíveis quando contêm lances. Registros genuinamente sem lances são preservados e identificados como não analisáveis. A retomada confere a identidade do motor; uma mudança de motor exige nova cobertura para evitar misturar avaliações incompatíveis.

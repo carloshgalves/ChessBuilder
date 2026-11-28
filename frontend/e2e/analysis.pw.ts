@@ -1,0 +1,20 @@
+import {test,expect} from '@playwright/test'
+test('bounded analysis preview and global controls',async({page,request})=>{
+ const pgn='[White "Batch fixture"]\n[Black "Other"]\n[Date "2031.01.05"]\n[TimeControl "900+10"]\n[Result "*"]\n\n1. e4 e5 *\n\n[White "Batch fixture"]\n[Black "Other 2"]\n[Date "2031.01.06"]\n[TimeControl "900+10"]\n[Result "*"]\n\n1. d4 d5 *';
+ const imported=await request.post('/api/import/pgn',{data:{pgn,username:'Batch fixture'}})
+ expect(imported.ok()).toBeTruthy()
+ await page.goto('/')
+ await page.getByRole('button',{name:'Análise',exact:true}).click()
+ await page.getByLabel('Origem',{exact:true}).selectOption('pgn')
+ await page.getByLabel('Ritmo',{exact:true}).selectOption('rapid')
+ await page.getByLabel('De',{exact:true}).fill('2031-01-01')
+ await page.getByLabel('Até',{exact:true}).fill('2031-01-31')
+ await page.getByLabel('Quantidade máxima').fill('1')
+ await expect(page.getByText('1 partidas selecionadas',{exact:true})).toBeVisible()
+ await expect(page.getByText(/2 encontradas · 2 elegíveis/)).toBeVisible()
+ await page.getByRole('button',{name:'Analisar 1 partidas',exact:true}).click()
+ await expect(page.getByRole('status').filter({hasText:'1 novas partidas enfileiradas'})).toBeVisible()
+ await page.getByLabel('Exibir jobs').selectOption('done')
+ await expect(page.getByRole('button',{name:'Anterior',exact:true})).toBeDisabled()
+ await expect(page.getByRole('button',{name:'Próxima',exact:true})).toBeVisible()
+})

@@ -44,7 +44,7 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 9:
+        if version > 10:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
@@ -64,6 +64,8 @@ def migrate(path=None):
             conn.executescript("BEGIN IMMEDIATE;"+TOURNAMENT_SCHEMA+"PRAGMA user_version=8; COMMIT;")
         if version < 9:
             conn.executescript("BEGIN IMMEDIATE;"+ASSISTANT_SCHEMA+"PRAGMA user_version=9; COMMIT;")
+        if version < 10:
+            conn.executescript("BEGIN IMMEDIATE;"+ACCOUNT_SCHEMA+"PRAGMA user_version=10; COMMIT;")
 
 TRAINING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_items(
@@ -141,4 +143,19 @@ CREATE TABLE IF NOT EXISTS tournament_simulations(tournament_id INTEGER NOT NULL
 ASSISTANT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS explanation_cache(cache_key TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS explanation_usage(day TEXT PRIMARY KEY,calls INTEGER NOT NULL);
+"""
+
+ACCOUNT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS game_accounts(
+ game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+ account_id INTEGER NOT NULL REFERENCES accounts(id),
+ player_color TEXT CHECK(player_color IN ('white','black')),
+ PRIMARY KEY(game_id,account_id));
+CREATE INDEX IF NOT EXISTS game_accounts_account ON game_accounts(account_id,game_id);
+INSERT OR IGNORE INTO game_accounts(game_id,account_id,player_color)
+ SELECT id,account_id,player_color FROM games WHERE account_id IS NOT NULL;
+INSERT OR IGNORE INTO game_accounts(game_id,account_id,player_color)
+ SELECT g.id,a.id,CASE WHEN a.username=g.white COLLATE NOCASE THEN 'white' ELSE 'black' END
+ FROM games g JOIN accounts a ON a.source=g.source AND (a.username=g.white COLLATE NOCASE OR a.username=g.black COLLATE NOCASE);
+CREATE INDEX IF NOT EXISTS jobs_status_priority ON jobs(status,priority,game_id);
 """

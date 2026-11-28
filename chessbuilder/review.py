@@ -4,6 +4,7 @@ import chess
 from fastapi import APIRouter,HTTPException,Query
 from fastapi.responses import PlainTextResponse
 from chessbuilder.db import connect
+from chessbuilder.integrity import saved_sql,total_sql,complete_sql,valid_sql
 router=APIRouter(prefix="/api")
 
 METRIC_VERSION="win-loss-mean-v2"
@@ -42,33 +43,50 @@ def summarize(analyses):
         result[color]={"accuracy":mean([m["accuracy"] for m in vals]),"acpl":mean([m["cp_loss"] for m in vals if m["cp_loss"] is not None]),"expected_score_loss":mean([m["expected_score_loss"] for m in vals if m["expected_score_loss"] is not None]),"analysed":len(vals)}
     return result
 
-JOB_ORDER="CASE status WHEN 'done' THEN 0 ELSE 1 END, next_ply DESC, CASE json_extract(settings,'$.level') WHEN 'detailed' THEN 2 WHEN 'deep' THEN 1 ELSE 0 END DESC, id DESC"
+JOB_ORDER="CASE WHEN "+complete_sql()+" THEN 0 ELSE 1 END, "+saved_sql()+" DESC, CASE json_extract(j.settings,'$.level') WHEN 'detailed' THEN 2 WHEN 'deep' THEN 1 ELSE 0 END DESC, j.id DESC"
 def select_job(c,gid):
-    return c.execute("SELECT * FROM jobs WHERE game_id=? AND next_ply>1 ORDER BY "+JOB_ORDER+" LIMIT 1",(gid,)).fetchone()
+    return c.execute("SELECT j.* FROM jobs j WHERE j.game_id=? AND "+saved_sql()+">0 ORDER BY "+JOB_ORDER+" LIMIT 1",(gid,)).fetchone()
 
 def get_analyses(c,job):
-    return {r["ply"]:json.loads(r["payload"]) for r in c.execute("SELECT ply,payload FROM move_analysis WHERE job_id=? ORDER BY ply",(job["id"],))} if job else {}
+    return {r["ply"]:json.loads(r["payload"]) for r in c.execute("SELECT a.ply,a.payload FROM move_analysis a JOIN jobs j ON j.id=a.job_id JOIN moves m ON m.game_id=j.game_id AND m.ply=a.ply WHERE a.job_id=? AND ("+valid_sql()+") ORDER BY a.ply",(job["id"],))} if job else {}
+
+def game_status_sql():
+    return ("CASE WHEN NOT EXISTS(SELECT 1 FROM moves m WHERE m.game_id=g.id) THEN 'no_moves' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND "+complete_sql()+") THEN 'done' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND j.status='running') THEN 'running' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND j.status='queued') THEN 'queued' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND "+saved_sql()+">0) THEN 'partial' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND j.status='failed') THEN 'failed' "
+        "ELSE 'unanalysed' END")
 
 def filters(source=None,speed=None,color=None,result=None,opening=None,search=None,start=None,end=None,status=None,account_id=None):
     clauses=[];args=[]
-    for column,value in (("source",source),("speed",speed),("player_color",color),("result",result),("account_id",account_id)):
+    for column,value in (("source",source),("speed",speed),("result",result)):
         if value is not None and value!="": clauses.append("g."+column+"=?");args.append(value)
+    if color:
+        if account_id is None:clauses.append("g.player_color=?");args.append(color)
+        else:clauses.append("EXISTS(SELECT 1 FROM game_accounts gc WHERE gc.game_id=g.id AND gc.account_id=? AND gc.player_color=?)");args.extend([account_id,color])
+    if account_id is not None:
+        clauses.append("EXISTS(SELECT 1 FROM game_accounts ga WHERE ga.game_id=g.id AND ga.account_id=?)");args.append(account_id)
     if opening:
         clauses.append("(g.opening LIKE ? OR g.eco LIKE ?)");args.extend(["%"+opening+"%"]*2)
     if search:
         clauses.append("(g.white LIKE ? OR g.black LIKE ?)");args.extend(["%"+search+"%"]*2)
     if start: clauses.append("g.played_at>=?");args.append(start)
     if end: clauses.append("substr(g.played_at,1,10)<=?");args.append(end)
-    if status=="unanalysed": clauses.append("NOT EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id)")
-    elif status: clauses.append("(SELECT status FROM jobs j WHERE j.game_id=g.id ORDER BY "+JOB_ORDER+" LIMIT 1)=?");args.append(status)
+    if status: clauses.append(game_status_sql()+"=?");args.append(status)
     return (" WHERE "+" AND ".join(clauses) if clauses else ""),args
 
 @router.get("/games")
 def games(source:str|None=None,speed:str|None=None,color:str|None=None,result:str|None=None,opening:str|None=None,search:str|None=None,start:str|None=None,end:str|None=None,status:str|None=None,account_id:int|None=None,limit:int=Query(100,ge=1,le=500),offset:int=Query(0,ge=0)):
     where,args=filters(source,speed,color,result,opening,search,start,end,status,account_id)
     with connect() as c:
-        rows=c.execute("SELECT g.id,g.source,g.played_at,g.speed,g.white,g.black,g.white_rating,g.black_rating,g.result,g.player_color,g.opening,g.eco,(SELECT status FROM jobs j WHERE j.game_id=g.id ORDER BY "+JOB_ORDER+" LIMIT 1) AS analysis_status FROM games g"+where+" ORDER BY g.played_at DESC,g.id DESC LIMIT ? OFFSET ?",(*args,limit,offset))
-        return [dict(r) for r in rows]
+        rows=c.execute("SELECT g.id,g.source,g.played_at,g.speed,g.white,g.black,g.white_rating,g.black_rating,g.result,g.player_color,g.opening,g.eco,"+game_status_sql()+" AS analysis_status FROM games g"+where+" ORDER BY g.played_at DESC,g.id DESC LIMIT ? OFFSET ?",(*args,limit,offset))
+        result=[dict(r) for r in rows]
+        if account_id is not None:
+            for r in result:
+                r["player_color"]=c.execute("SELECT player_color FROM game_accounts WHERE game_id=? AND account_id=?",(r["id"],account_id)).fetchone()[0]
+        return result
 
 def line(board,pv):
     b=board.copy()
@@ -92,6 +110,8 @@ def detail(game_id:int):
         moves=[dict(r) for r in c.execute("SELECT * FROM moves WHERE game_id=? ORDER BY ply",(game_id,))]
         job=select_job(c,game_id)
         analyses=get_analyses(c,job)
+        active=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
+        latest=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
     from chessbuilder.tactics import diagnose
     from chessbuilder.strategy import diagnose_strategy
     board=chess.Board(game["initial_fen"])
@@ -106,7 +126,7 @@ def detail(game_id:int):
             move["played_line"]=line(board,a["played"]["pv"])
             move["variations"]=[line(board,v["pv"]) for v in a["alternatives"]]
         board.push_uci(move["uci"])
-    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION}
+    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION,"coverage":{"saved":len(analyses),"total":len(moves),"status":"no_moves" if not moves else "complete" if len(analyses)==len(moves) else "partial" if analyses else "unanalysed"},"active_job":dict(active) if active else None,"latest_job":dict(latest) if latest else None}
 
 @router.get("/games/{game_id}/pgn",response_class=PlainTextResponse)
 def export(game_id:int):

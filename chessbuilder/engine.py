@@ -9,10 +9,11 @@ import threading
 from pathlib import Path
 import chess
 import chess.engine
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from chessbuilder.db import connect
-from chessbuilder.importer import context_key
+from chessbuilder.importer import context_key,restore_empty_games
+from chessbuilder.integrity import saved_sql,total_sql,complete_sql,saved_plies,saved_ply,first_missing,reconcile_jobs
 
 router=APIRouter(prefix="/api")
 LEVELS={"quick":12000,"deep":120000,"detailed":350000}
@@ -86,19 +87,25 @@ def analyse_move(engine,board,move,settings,engine_id):
 def consistent_checkpoint(job,engine_id):
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        rows=c.execute("SELECT payload FROM move_analysis WHERE job_id=?",(job["id"],)).fetchall()
-        if any(json.loads(r[0]).get("engine")!=engine_id for r in rows):
+        rows=c.execute("SELECT payload FROM move_analysis WHERE job_id=? AND json_valid(payload)",(job["id"],)).fetchall()
+        if any(isinstance(p,dict) and p.get("engine") is not None and p["engine"]!=engine_id for r in rows if (p:=json.loads(r[0]))):
             c.execute("DELETE FROM move_analysis WHERE job_id=?",(job["id"],))
             c.execute("UPDATE jobs SET next_ply=1 WHERE id=?",(job["id"],))
             return 1
-        return job["next_ply"]
+        next_ply,_,_=first_missing(c,job["id"],job["game_id"])
+        c.execute("UPDATE jobs SET next_ply=? WHERE id=?",(next_ply,job["id"]))
+        return next_ply
 
 class Worker:
     def __init__(self):
         self.shutdown=threading.Event()
         self.thread=threading.Thread(target=self.run,daemon=True)
     def start(self):
-        with connect() as c: c.execute("UPDATE jobs SET status='queued' WHERE status='running'")
+        restore_empty_games()
+        with connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            reconcile_jobs(c)
+            c.execute("UPDATE jobs SET status='queued' WHERE status='running'")
         self.thread.start()
     def stop(self):
         self.shutdown.set()
@@ -126,16 +133,23 @@ class Worker:
         with connect() as c:
             game=c.execute("SELECT initial_fen FROM games WHERE id=?",(job["game_id"],)).fetchone()
             moves=c.execute("SELECT ply,uci FROM moves WHERE game_id=? ORDER BY ply",(job["game_id"],)).fetchall()
+        if not moves:
+            raise ValueError("Partida sem lances no PGN; não há análise a executar.")
+        if [r["ply"] for r in moves]!=list(range(1,len(moves)+1)):
+            raise ValueError("Histórico de lances incompleto")
         board=chess.Board(game["initial_fen"])
         engine=chess.engine.SimpleEngine.popen_uci(path,timeout=15)
         try:
             engine.configure({"Threads":s.threads,"Hash":s.hash_mb})
             if "UCI_ShowWDL" in engine.options: engine.configure({"UCI_ShowWDL":True})
             eid=identity(engine,path)
-            next_ply=consistent_checkpoint(job,eid)
+            consistent_checkpoint(job,eid)
+            with connect() as c:
+                saved=saved_plies(c,job["id"])
+                saved={r["ply"] for r in c.execute("SELECT ply,payload FROM move_analysis WHERE job_id=? AND json_valid(payload)",(job["id"],)) if r["ply"] in saved and json.loads(r["payload"]).get("engine")==eid}
             for row in moves:
                 move=chess.Move.from_uci(row["uci"])
-                if row["ply"]>=next_ply:
+                if row["ply"] not in saved:
                     with connect() as c: status=c.execute("SELECT status FROM jobs WHERE id=?",(job["id"],)).fetchone()[0]
                     if self.shutdown.is_set() or status!="running": return
                     result=analyse_move(engine,board,move,s,eid)
@@ -143,9 +157,14 @@ class Worker:
                         c.execute("BEGIN IMMEDIATE")
                         if c.execute("SELECT status FROM jobs WHERE id=?",(job["id"],)).fetchone()[0]!="running": return
                         c.execute("INSERT OR REPLACE INTO move_analysis VALUES(?,?,?)",(job["id"],row["ply"],json.dumps(result)))
+                        if not saved_ply(c,job["id"],row["ply"]):raise ValueError("Avaliação inválida; checkpoint não avançou")
                         c.execute("UPDATE jobs SET next_ply=? WHERE id=?",(row["ply"]+1,job["id"]))
                 board.push(move)
-            with connect() as c: c.execute("UPDATE jobs SET status='done' WHERE id=? AND status='running'",(job["id"],))
+            with connect() as c:
+                c.execute("BEGIN IMMEDIATE")
+                next_ply,saved_count,total=first_missing(c,job["id"],job["game_id"])
+                if total==0 or saved_count!=total:raise ValueError(f"Análise incompleta: {saved_count}/{total} lances salvos")
+                c.execute("UPDATE jobs SET status='done',next_ply=?,error=NULL WHERE id=? AND status='running'",(next_ply,job["id"]))
         finally:
             try: engine.quit()
             except Exception: engine.close()
@@ -175,7 +194,7 @@ def scope_where(body,alias="g"):
     for key in ("account_id","source","speed"):
         value=getattr(body,key)
         if value is not None:
-            clauses.append(f"{alias}.{key}=?");args.append(value)
+            clauses.append(f"EXISTS(SELECT 1 FROM game_accounts ga WHERE ga.game_id={alias}.id AND ga.account_id=?)" if key=="account_id" else f"{alias}.{key}=?");args.append(value)
     if body.start:
         clauses.append(f"{alias}.played_at>=?");args.append(body.start.isoformat())
     if body.end:
@@ -194,16 +213,16 @@ def selection(c,body,settings):
     # (threads/hash) are not depth; MultiPV coverage is a separate requirement.
     # A completed exact-settings job remains immutable under every policy.
     depth={"quick":1,"deep":2,"detailed":3}[body.level]
-    reason="""CASE
+    reason=f"""CASE
       WHEN NOT EXISTS(SELECT 1 FROM moves m WHERE m.game_id=g.id) THEN 'no_moves'
       WHEN EXISTS(SELECT 1 FROM jobs active WHERE active.game_id=g.id AND active.status IN ('queued','running')) THEN 'active'
-      WHEN j.status='done' THEN 'completed'
+      WHEN j.status='done' AND {complete_sql("j")} THEN 'completed'
       WHEN ? AND EXISTS(SELECT 1 FROM jobs complete WHERE complete.game_id=g.id AND complete.status='done'
-        AND CASE json_extract(complete.settings,'$.level') WHEN 'quick' THEN 1 WHEN 'deep' THEN 2 WHEN 'detailed' THEN 3 ELSE 0 END >= ?
+        AND {complete_sql("complete")} AND CASE json_extract(complete.settings,'$.level') WHEN 'quick' THEN 1 WHEN 'deep' THEN 2 WHEN 'detailed' THEN 3 ELSE 0 END >= ?
         AND COALESCE(json_extract(complete.settings,'$.multipv'),1)>=?
         AND (?=0 OR json_extract(complete.settings,'$.level') IN ('deep','detailed') OR COALESCE(json_extract(complete.settings,'$.auto_deepen'),1)=1))
         THEN 'completed'
-      WHEN j.status IN ('paused','failed','cancelled') AND NOT ? THEN 'interrupted_disabled'
+      WHEN j.status IN ('paused','failed','cancelled','done') AND NOT ? THEN 'interrupted_disabled'
       ELSE 'eligible' END"""
     params=[int(body.skip_completed and body.game_id is None),depth,body.multipv,int(body.level=="quick" and body.auto_deepen),int(body.include_interrupted),settings,*args]
     cte="WITH candidates AS (SELECT g.id,g.white,g.black,g.played_at,g.speed,g.source,j.id AS job_id,j.status AS job_status,"+reason+""" AS reason,
@@ -268,11 +287,19 @@ def bulk_control(body:BulkRequest):
         return {"changed":c.execute("SELECT changes()").fetchone()[0],"status":target}
 
 @router.get("/analysis/jobs")
-def jobs():
+def jobs(status:Literal["queued","running","paused","done","failed","cancelled"]|None=None,account_id:int|None=None,
+         limit:int=Query(50,ge=1,le=200),offset:int=Query(0,ge=0)):
+    clauses,args=scope_where(Scope(account_id=account_id))
+    if status:clauses.append("j.status=?");args.append(status)
+    where=" WHERE "+" AND ".join(clauses) if clauses else ""
+    join=" FROM jobs j JOIN games g ON g.id=j.game_id"
     with connect() as c:
-        rows=c.execute("SELECT j.*,g.white,g.black,g.account_id,g.source,g.speed,g.played_at,(SELECT COUNT(*) FROM moves m WHERE m.game_id=j.game_id) AS total_plies FROM jobs j JOIN games g ON g.id=j.game_id ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'paused' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,j.priority DESC,g.played_at DESC,j.id DESC LIMIT 200").fetchall()
+        c.execute("BEGIN")
+        total=c.execute("SELECT COUNT(*)"+join+where,args).fetchone()[0]
+        rows=c.execute("SELECT j.*,g.white,g.black,g.account_id,g.source,g.speed,g.played_at,"+total_sql()+" AS total_plies,"+saved_sql()+" AS saved_plies"+join+where+
+            " ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'paused' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,j.priority DESC,g.played_at DESC,j.id DESC LIMIT ? OFFSET ?",(*args,limit,offset)).fetchall()
         counts={r[0]:r[1] for r in c.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status")}
-        return {"engine_available":bool(executable()),"temperatures_c":temperatures(),"counts":counts,"jobs":[dict(r) for r in rows]}
+        return {"engine_available":bool(executable()),"temperatures_c":temperatures(),"counts":counts,"total":total,"offset":offset,"limit":limit,"jobs":[dict(r) for r in rows]}
 
 @router.post("/analysis/jobs/{job_id}/{action}")
 def control(job_id:int,action:str):
@@ -280,8 +307,10 @@ def control(job_id:int,action:str):
     if action not in transitions: raise HTTPException(422,"Ação inválida")
     target,allowed=transitions[action]
     with connect() as c:
-        row=c.execute("SELECT status FROM jobs WHERE id=?",(job_id,)).fetchone()
+        c.execute("BEGIN IMMEDIATE")
+        row=c.execute("SELECT status,game_id FROM jobs WHERE id=?",(job_id,)).fetchone()
         if not row: raise HTTPException(404,"Job não encontrado")
         if row[0] not in allowed: raise HTTPException(409,"Transição inválida")
+        if action=="resume" and c.execute("SELECT 1 FROM jobs WHERE game_id=? AND status IN ('queued','running') AND id!=?",(row["game_id"],job_id)).fetchone():raise HTTPException(409,"Já existe análise ativa para esta partida")
         c.execute("UPDATE jobs SET status=?,error=NULL WHERE id=? AND status=?",(target,job_id,row[0]))
     return {"status":target}
