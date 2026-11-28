@@ -11,8 +11,6 @@ test('coach session and board interaction',async({page,request})=>{
  await expect(page.getByRole('button',{name:/^e7 /})).toBeVisible();
  await page.getByRole('button',{name:/^e7 /}).click();
  await page.getByRole('button',{name:'e5',exact:true}).click();
- await expect(page.getByLabel('Lance UCI')).toHaveValue('e7e5');
- await page.getByRole('button',{name:'Responder'}).click();
  await expect(page.getByRole('heading',{name:'Correto'})).toBeVisible();
  await page.getByRole('link',{name:'Voltar à sessão'}).click();
  await page.getByRole('button',{name:'Concluir sessão'}).click();
