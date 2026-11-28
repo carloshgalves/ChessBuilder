@@ -69,3 +69,6 @@ app.include_router(explanation_router)
 
 from chessbuilder.time_management import router as time_router
 app.include_router(time_router)
+
+from chessbuilder.explore import router as explore_router
+app.include_router(explore_router)
