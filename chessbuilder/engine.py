@@ -190,26 +190,40 @@ def selection(c,body,settings):
     elif body.source is None:
         clauses.append("g.source!='historical'")
     where=" AND ".join(clauses) or "1=1"
-    matched=c.execute("SELECT COUNT(*) FROM games g WHERE "+where,args).fetchone()[0]
-    # A game is eligible only if the exact configuration has no job or an
-    # interrupted job can be resumed. A different active job is never duplicated.
-    eligible=where+""" AND EXISTS(SELECT 1 FROM moves m WHERE m.game_id=g.id)
-      AND (j.id IS NULL OR (j.status IN ('paused','failed','cancelled') AND ?))
-      AND NOT EXISTS(SELECT 1 FROM jobs active WHERE active.game_id=g.id AND active.status IN ('queued','running'))"""
-    parameters=[settings,*args,int(body.include_interrupted)]
-    if body.skip_completed and body.game_id is None:
-        eligible+=" AND NOT EXISTS(SELECT 1 FROM jobs complete WHERE complete.game_id=g.id AND complete.status='done')"
-    join=" FROM games g LEFT JOIN jobs j ON j.game_id=g.id AND j.settings=? WHERE "+eligible
-    count=c.execute("SELECT COUNT(*)"+join,parameters).fetchone()[0]
+    # Completed shallow jobs do not satisfy a deeper request. Resources
+    # (threads/hash) are not depth; MultiPV coverage is a separate requirement.
+    # A completed exact-settings job remains immutable under every policy.
+    depth={"quick":1,"deep":2,"detailed":3}[body.level]
+    reason="""CASE
+      WHEN NOT EXISTS(SELECT 1 FROM moves m WHERE m.game_id=g.id) THEN 'no_moves'
+      WHEN EXISTS(SELECT 1 FROM jobs active WHERE active.game_id=g.id AND active.status IN ('queued','running')) THEN 'active'
+      WHEN j.status='done' THEN 'completed'
+      WHEN ? AND EXISTS(SELECT 1 FROM jobs complete WHERE complete.game_id=g.id AND complete.status='done'
+        AND CASE json_extract(complete.settings,'$.level') WHEN 'quick' THEN 1 WHEN 'deep' THEN 2 WHEN 'detailed' THEN 3 ELSE 0 END >= ?
+        AND COALESCE(json_extract(complete.settings,'$.multipv'),1)>=?
+        AND (?=0 OR json_extract(complete.settings,'$.level') IN ('deep','detailed') OR COALESCE(json_extract(complete.settings,'$.auto_deepen'),1)=1))
+        THEN 'completed'
+      WHEN j.status IN ('paused','failed','cancelled') AND NOT ? THEN 'interrupted_disabled'
+      ELSE 'eligible' END"""
+    params=[int(body.skip_completed and body.game_id is None),depth,body.multipv,int(body.level=="quick" and body.auto_deepen),int(body.include_interrupted),settings,*args]
+    cte="WITH candidates AS (SELECT g.id,g.white,g.black,g.played_at,g.speed,g.source,j.id AS job_id,j.status AS job_status,"+reason+""" AS reason,
+       EXISTS(SELECT 1 FROM jobs old WHERE old.game_id=g.id AND old.status IN ('paused','failed','cancelled') AND old.settings!=?) AS other_interrupted,
+       EXISTS(SELECT 1 FROM jobs old WHERE old.game_id=g.id AND old.status='done') AS prior_completed
+       FROM games g LEFT JOIN jobs j ON j.game_id=g.id AND j.settings=? WHERE """+where+") "
+    params.insert(5,settings)
+    counts={r[0]:r[1] for r in c.execute(cte+"SELECT reason,COUNT(*) FROM candidates GROUP BY reason",params)}
+    count=counts.get("eligible",0)
     direction="DESC" if body.order=="recent" else "ASC"
-    rows=c.execute("SELECT g.id,g.white,g.black,g.played_at,g.speed,g.source,j.id AS job_id,j.status AS job_status"+join+
-        f" ORDER BY g.played_at IS NULL,g.played_at {direction},g.id {direction} LIMIT ?",(*parameters,1 if body.game_id is not None else body.limit)).fetchall()
-    return matched,count,rows
+    rows=c.execute(cte+f"SELECT * FROM candidates WHERE reason='eligible' ORDER BY played_at IS NULL,played_at {direction},id {direction} LIMIT ?",(*params,1 if body.game_id is not None else body.limit)).fetchall()
+    return sum(counts.values()),count,rows,counts
 
-def selection_summary(matched,count,rows):
+def selection_summary(matched,count,rows,counts):
     resumed=sum(r["job_id"] is not None for r in rows)
     return {"matched":matched,"eligible":count,"selected":len(rows),"new":len(rows)-resumed,"resumable":resumed,
-            "remaining":max(0,count-len(rows)),"sample":[{k:r[k] for k in ("id","white","black","played_at","speed","source","job_status")} for r in rows[:10]]}
+            "remaining":max(0,count-len(rows)),"excluded":{k:v for k,v in counts.items() if k!="eligible"},
+            "upgrades":sum(r["job_id"] is None and r["prior_completed"] for r in rows),
+            "other_interrupted":sum(r["job_id"] is None and r["other_interrupted"] for r in rows),
+            "sample":[{k:r[k] for k in ("id","white","black","played_at","speed","source","job_status")} for r in rows[:10]]}
 
 @router.post("/analysis/preview")
 def preview(body:QueueRequest):
@@ -223,8 +237,8 @@ def enqueue(body:QueueRequest):
     settings=settings_json(Settings.model_validate(body.model_dump()))
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        matched,count,rows=selection(c,body,settings)
-        summary=selection_summary(matched,count,rows)
+        matched,count,rows,counts=selection(c,body,settings)
+        summary=selection_summary(matched,count,rows,counts)
         queued=resumed=0
         for r in rows:
             if r["job_id"] is None:
