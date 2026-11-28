@@ -151,3 +151,35 @@ def persist_fixture(c,job_id,game_id):
         score={"cp":50,"mate":None,"pv":[row["uci"]]}
         a={"perspective":"white" if row["ply"]%2 else "black","best":score,"played":score,"alternatives":[score],"engine":{"name":"fixture"}}
         c.execute("INSERT OR REPLACE INTO move_analysis VALUES(?,?,?)",(job_id,row["ply"],json.dumps(a)))
+
+def test_compact_reuses_candidates_and_keeps_legacy_namespace(tmp_path,monkeypatch):
+    from chessbuilder.engine import settings_json,search_move
+    import json
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    b=chess.Board()
+    m=list(b.legal_moves)[1]
+    classic=Settings(auto_deepen=False)
+    compact=classic.model_copy(update={"search_policy":"compact-v1"})
+    assert "search_policy" not in json.loads(settings_json(classic))
+    assert json.loads(settings_json(compact))["search_policy"]=="compact-v1"
+    old,new=Fake(),Fake()
+    search_move(old,b,m,classic,{"name":"fixture"})
+    result=search_move(new,b,m,compact,{"name":"fixture"})
+    assert old.calls==3 and new.calls==1
+    assert result["played"]["pv"][0]==m.uci()
+    assert result["played"]==result["alternatives"][1]
+    assert search_move(new,b,m,compact,{"name":"fixture"})==result and new.calls==1
+    outside=list(b.legal_moves)[-1]
+    result=search_move(new,b,outside,compact,{"name":"fixture"})
+    assert new.calls==2 and result["played"]["pv"][0]==outside.uci()
+
+def test_completed_classic_does_not_hide_compact_request(tmp_path,monkeypatch):
+    from chessbuilder.engine import preview
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
+    enqueue(QueueRequest())
+    with connect() as c:
+        persist_fixture(c,1,1)
+        c.execute("UPDATE jobs SET status='done'")
+    assert preview(QueueRequest(search_policy="compact-v1"))["eligible"]==1
+    assert preview(QueueRequest())["excluded"]=={"completed":1}

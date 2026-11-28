@@ -26,10 +26,17 @@ class Settings(BaseModel):
     hash_mb:int=Field(default=128,ge=16,le=1024)
     multipv:int=Field(default=2,ge=1,le=5)
     auto_deepen:bool=True
+    search_policy:Literal['classic','compact-v1']='classic'
+
+def persisted_settings(s):
+    result=s.model_dump()
+    # Preserve the exact legacy serialization and cache namespace.
+    if result.get('search_policy')=='classic':result.pop('search_policy')
+    return result
 
 def settings_json(s):
     if s.level not in LEVELS: raise HTTPException(422,"Nível inválido")
-    return json.dumps(s.model_dump(),sort_keys=True)
+    return json.dumps(persisted_settings(s),sort_keys=True)
 
 def executable():
     return os.environ.get("CHESSBUILDER_STOCKFISH") or shutil.which("stockfish") or ("/usr/games/stockfish" if Path("/usr/games/stockfish").is_file() else None)
@@ -54,7 +61,7 @@ def serialize(info,turn):
     return {"cp":score.score(),"mate":score.mate(),"pv":[m.uci() for m in info.get("pv",[])],"depth":info.get("depth"),"nodes":info.get("nodes"),"wdl":list(wdl.pov(turn)) if wdl else None}
 
 def search(engine,board,settings,engine_id,root=None,multipv=1):
-    key=hashlib.sha256(json.dumps([ANALYSIS_PROTOCOL,context_key(board),board.fen(),engine_id,settings.model_dump(),root.uci() if root else None,multipv],sort_keys=True).encode()).hexdigest()
+    key=hashlib.sha256(json.dumps([ANALYSIS_PROTOCOL,context_key(board),board.fen(),engine_id,persisted_settings(settings),root.uci() if root else None,multipv],sort_keys=True).encode()).hexdigest()
     with connect() as c:
         row=c.execute("SELECT payload FROM evaluations WHERE cache_key=?",(key,)).fetchone()
         if row: return json.loads(row[0])
@@ -64,10 +71,16 @@ def search(engine,board,settings,engine_id,root=None,multipv=1):
     return result
 
 def search_move(engine,board,move,settings,engine_id):
-    best=search(engine,board,settings,engine_id)[0]
-    played=best if best["pv"] and best["pv"][0]==move.uci() else search(engine,board,settings,engine_id,root=move)[0]
-    alternatives=search(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count())) if settings.multipv>1 else [best]
-    return {"engine":engine_id,"settings":settings.model_dump(),"perspective":"white" if board.turn else "black","best":best,"played":played,"alternatives":alternatives}
+    if settings.search_policy=="compact-v1":
+        alternatives=search(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count()))
+        best=alternatives[0]
+        played=next((candidate for candidate in alternatives if candidate["pv"] and candidate["pv"][0]==move.uci()),None)
+        if played is None:played=search(engine,board,settings,engine_id,root=move)[0]
+    else:
+        best=search(engine,board,settings,engine_id)[0]
+        played=best if best["pv"] and best["pv"][0]==move.uci() else search(engine,board,settings,engine_id,root=move)[0]
+        alternatives=search(engine,board,settings,engine_id,multipv=min(settings.multipv,board.legal_moves.count())) if settings.multipv>1 else [best]
+    return {"engine":engine_id,"settings":persisted_settings(settings),"perspective":"white" if board.turn else "black","best":best,"played":played,"alternatives":alternatives}
 
 def estimated_chance(score):
     mate=score.get("mate")
@@ -224,16 +237,17 @@ def selection(c,body,settings):
       WHEN ? AND EXISTS(SELECT 1 FROM jobs complete WHERE complete.game_id=g.id AND complete.status='done'
         AND {complete_sql("complete")} AND CASE json_extract(complete.settings,'$.level') WHEN 'quick' THEN 1 WHEN 'deep' THEN 2 WHEN 'detailed' THEN 3 ELSE 0 END >= ?
         AND COALESCE(json_extract(complete.settings,'$.multipv'),1)>=?
+        AND COALESCE(json_extract(complete.settings,'$.search_policy'),'classic')=?
         AND (?=0 OR json_extract(complete.settings,'$.level') IN ('deep','detailed') OR COALESCE(json_extract(complete.settings,'$.auto_deepen'),1)=1))
         THEN 'completed'
       WHEN j.status IN ('paused','failed','cancelled','done') AND NOT ? THEN 'interrupted_disabled'
       ELSE 'eligible' END"""
-    params=[int(body.skip_completed and body.game_id is None),depth,body.multipv,int(body.level=="quick" and body.auto_deepen),int(body.include_interrupted),settings,*args]
+    params=[int(body.skip_completed and body.game_id is None),depth,body.multipv,body.search_policy,int(body.level=="quick" and body.auto_deepen),int(body.include_interrupted),settings,*args]
     cte="WITH candidates AS (SELECT g.id,g.white,g.black,g.played_at,g.speed,g.source,j.id AS job_id,j.status AS job_status,"+reason+""" AS reason,
        EXISTS(SELECT 1 FROM jobs old WHERE old.game_id=g.id AND old.status IN ('paused','failed','cancelled') AND old.settings!=?) AS other_interrupted,
        EXISTS(SELECT 1 FROM jobs old WHERE old.game_id=g.id AND old.status='done') AS prior_completed
        FROM games g LEFT JOIN jobs j ON j.game_id=g.id AND j.settings=? WHERE """+where+") "
-    params.insert(5,settings)
+    params.insert(6,settings)
     counts={r[0]:r[1] for r in c.execute(cte+"SELECT reason,COUNT(*) FROM candidates GROUP BY reason",params)}
     count=counts.get("eligible",0)
     direction="DESC" if body.order=="recent" else "ASC"
