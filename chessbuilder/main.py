@@ -75,3 +75,6 @@ app.include_router(explore_router)
 
 from chessbuilder.diagrams import router as diagram_router
 app.include_router(diagram_router)
+
+from chessbuilder.champions import router as champions_router
+app.include_router(champions_router)

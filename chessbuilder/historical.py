@@ -25,6 +25,7 @@ def import_corpus(body:Corpus):
     added=duplicates=0;errors=[]
     for i,(game,raw) in enumerate(parse(body.pgn),1):
         try:
+            if not game.variations:raise ValueError("Partida sem lances")
             h=game.headers;identity=digest([game.board().fen(),h.get("White","").casefold(),h.get("Black","").casefold(),h.get("Result"),[m.uci() for m in game.mainline_moves()]])
             store(game,raw,"historical",identity)
             with connect() as c:
@@ -58,8 +59,17 @@ def catalog():
     for r in rows:r["missing"]=max(0,r["expected_games"]-r["imported"]) if r["expected_games"] is not None else None
     return {"source":"https://www.pgnmentor.com/files.html","editions":[{"edition":e,"imported":any(r["edition"]==e and r["imported"]>0 for r in rows)} for e in EDITION_IDS],"corpora":rows}
 @router.get("/games")
-def games(corpus_id:int|None=None,player:str="",limit:int=Query(100,ge=1,le=500),offset:int=Query(0,ge=0)):
-    with connect() as c:return [dict(r) for r in c.execute("""SELECT DISTINCT g.id,g.white,g.black,g.played_at,g.result,(SELECT COUNT(*) FROM moves m WHERE m.game_id=g.id) AS plies FROM historical_entries e JOIN games g ON g.id=e.game_id WHERE (? IS NULL OR e.corpus_id=?) AND (g.white LIKE ? OR g.black LIKE ?) ORDER BY g.played_at DESC,g.id LIMIT ? OFFSET ?""",(corpus_id,corpus_id,"%"+player+"%","%"+player+"%",limit,offset))]
+def games(corpus_id:int|None=None,player:str="",opening:str="",start:str="",end:str="",result:str="",limit:int=Query(100,ge=1,le=500),offset:int=Query(0,ge=0)):
+    clauses=["(? IS NULL OR e.corpus_id=?)","(g.white LIKE ? OR g.black LIKE ?)"]
+    args=[corpus_id,corpus_id,"%"+player+"%","%"+player+"%"]
+    if opening:clauses.append("(g.opening LIKE ? OR g.eco LIKE ?)");args.extend(["%"+opening+"%"]*2)
+    if start:clauses.append("g.played_at>=?");args.append(start)
+    if end:clauses.append("substr(g.played_at,1,10)<=?");args.append(end)
+    if result:clauses.append("g.result=?");args.append(result)
+    with connect() as c:
+        return [dict(r) for r in c.execute("""SELECT DISTINCT g.id,g.white,g.black,g.white_rating,g.black_rating,g.played_at,g.result,g.opening,g.eco,
+            (SELECT COUNT(*) FROM moves m WHERE m.game_id=g.id) AS plies
+            FROM historical_entries e JOIN games g ON g.id=e.game_id WHERE """+" AND ".join(clauses)+" ORDER BY g.played_at DESC,g.id LIMIT ? OFFSET ?",(*args,limit,offset))]
 class Curate(BaseModel):
     game_id:int
     ply:int=Field(ge=1)
