@@ -63,7 +63,8 @@ def game_status_sql():
 def filters(source=None,speed=None,color=None,result=None,opening=None,search=None,start=None,end=None,status=None,account_id=None):
     clauses=[];args=[]
     for column,value in (("source",source),("speed",speed),("result",result)):
-        if value is not None and value!="": clauses.append("g."+column+"=?");args.append(value)
+        if column=="source" and value=="nonhistorical":clauses.append("g.source!='historical'")
+        elif value is not None and value!="": clauses.append("g."+column+"=?");args.append(value)
     if color:
         if account_id is None:clauses.append("g.player_color=?");args.append(color)
         else:clauses.append("EXISTS(SELECT 1 FROM game_accounts gc WHERE gc.game_id=g.id AND gc.account_id=? AND gc.player_color=?)");args.extend([account_id,color])

@@ -1,0 +1,16 @@
+import {test,expect} from '@playwright/test'
+test('workspace navigation and theme persist',async({page})=>{
+ await page.goto('/')
+ await page.getByLabel('Tema da interface').selectOption('forest')
+ await expect(page.locator('.workspace')).toHaveAttribute('data-workspace-theme','forest')
+ await page.getByRole('button',{name:'História',exact:true}).click()
+ await expect(page.getByRole('heading',{name:'Biblioteca histórica'})).toBeVisible()
+ await expect(page.getByRole('heading',{name:'Magnus Carlsen'})).toBeVisible()
+ await page.reload()
+ await expect(page.getByRole('heading',{name:'Biblioteca histórica'})).toBeVisible()
+ await expect(page.locator('.workspace')).toHaveAttribute('data-workspace-theme','forest')
+ await page.getByRole('button',{name:'Recolher navegação'}).click()
+ await expect(page.locator('.workspace')).toHaveClass(/nav-compact/)
+ await page.getByRole('button',{name:'Partidas',exact:true}).click()
+ await expect(page.getByRole('heading',{name:'Partidas',exact:true})).toBeVisible()
+})
