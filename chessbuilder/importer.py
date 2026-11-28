@@ -4,7 +4,7 @@ import json
 import re
 import time
 from datetime import datetime, timezone
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urljoin
 
 import chess
 import chess.pgn
@@ -106,9 +106,23 @@ def retry_delay(headers,attempt):
     return min(60,max(1,int(delay))) if delay.isdigit() else 2**attempt
 
 def request(client,url,**kw):
+    # Limit redirects to the official HTTPS API; never forward to arbitrary hosts.
+    redirects=0
     for i in range(4):
         try:
-            res=client.get(url,**kw)
+            while True:
+                res=client.get(url,follow_redirects=False,**kw)
+                if res.status_code not in (301,302,303,307,308):
+                    break
+                location=res.headers.get("Location")
+                if not location or redirects>=3:
+                    res.raise_for_status()
+                target=urljoin(str(res.url),location)
+                parsed=urlparse(target)
+                if parsed.scheme!="https" or parsed.hostname!="api.chess.com" or parsed.port not in (None,443) or parsed.username is not None or parsed.password is not None:
+                    raise ValueError("Redirecionamento externo inválido")
+                url=target
+                redirects+=1
             if res.status_code not in (429,500,502,503,504):
                 res.raise_for_status()
                 return res
@@ -121,6 +135,8 @@ def request(client,url,**kw):
     raise RuntimeError("Falha na requisição")
 
 def sync(source,username,client):
+    if source=="chess.com":
+        username=username.lower()
     account=account_id(source,username)
     added=skipped=0
     errors=[]
