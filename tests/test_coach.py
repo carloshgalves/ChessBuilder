@@ -95,3 +95,14 @@ def test_adaptive_separates_novel_repeat_and_sources(local):
         score,reasons=practice_signal(r,p)
         assert score>0 and any("1400" in x for x in reasons)
         assert practice_profile(c,date(2025,12,31))==[]
+
+def test_adaptive_plan_excludes_already_seen_duplicate(local):
+    from chessbuilder.coach import select_plan
+    from datetime import date
+    with connect() as c:
+        for key in ("first","duplicate"):
+            insert_item(c,"lichess",None,None,None,chess.Board(),"calculation",["fork"],[["e2e4"]],{},1500,key)
+        c.execute("INSERT INTO training_attempts(item_id,started_at,finished_at,correct,hints,status) VALUES(1,'2026-01-02T10:00:00+00:00','2026-01-02T10:01:00+00:00',1,0,'passed')")
+        plan=select_plan(c,PlanRequest(minutes=20),date(2026,1,3))
+        assert all(x["item_id"]!=2 for x in plan["items"])
+        assert plan["items"][0]["item_id"]==1 and plan["items"][0]["reason"]=="review_due"

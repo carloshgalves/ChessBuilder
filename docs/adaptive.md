@@ -1,2 +1,4 @@
 # Adaptive practice
 The daily coach combines observed game weaknesses per theme/phase with first-attempt, unassisted exercise performance by source. Repeated positions never count as novel across sources. Eight novel positions are the minimum for a practice adjustment. Lichess puzzle difficulty targets adjust by at most 100 points relative to the median attempted puzzle difficulty; this is a heuristic, not a player rating or validated learning model. Reviews remain due according to the existing scheduler. Session time and persistence are preserved. Each item carries ranking reasons and source. Competitive transfer remains descriptive.
+
+The first affordable due review is prioritized; duplicate positions already attempted through another item do not enter the novel queue. Other items compete on evidence, goal and diversity. The policy is a heuristic; its training effect requires longitudinal validation.

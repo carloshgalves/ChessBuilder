@@ -174,6 +174,7 @@ def select_plan(c,body,day):
         key=(r["theme"],r["phase"])
         priority[key]=max(priority[key],r["priority"])
     profiles=practice_profile(c,day)
+    seen_practice={position_key(r[0]) for r in c.execute("""SELECT DISTINCT t.fen FROM training_attempts a JOIN training_items t ON t.id=a.item_id WHERE a.finished_at IS NOT NULL AND substr(a.finished_at,1,10)<=?""",(day.isoformat(),))}
     from chessbuilder.repetition import sync_reviews
     sync_reviews(c)
     candidates=c.execute("""SELECT t.*,g.speed AS game_speed,s.due_at AS scheduled_due,
@@ -187,6 +188,8 @@ def select_plan(c,body,day):
         last=date.fromisoformat(r["last_attempt"][:10]) if r["last_attempt"] else None
         due=bool(r["scheduled_due"] and r["scheduled_due"][:10]<=day.isoformat()) if r["scheduled_due"] else bool(last and (day-last).days>=(3 if r["last_correct"] else 1))
         if last and not due:continue
+        # A duplicate position from a different source is not novel practice.
+        if not last and position_key(r["fen"]) in seen_practice:continue
         goal_match=body.goal=="general" or body.goal=="tactics" and any(t!="unclassified" for t in themes) or body.goal==r["kind"]
         weakness=max([priority[(t,r["phase"])] for t in themes] or [0])
         practice,reasons=practice_signal(r,profiles)
@@ -200,7 +203,10 @@ def select_plan(c,body,day):
     while ranking:
         affordable=[x for x in ranking if x[1]<=remaining and " ".join(x[0]["fen"].split()[:4]) not in seen_positions]
         if not affordable:break
-        best=max(affordable,key=lambda x:(x[2]-2*max([used[t] for t in x[4]] or [0]),-x[0]["id"]))
+        # Prioritize at least one due review when one fits; afterwards rank
+        # by evidence and diversity rather than spending the entire plan on repetitions.
+        due_first=[x for x in affordable if x[3]] if not selected else []
+        best=max(due_first or affordable,key=lambda x:(x[2]-2*max([used[t] for t in x[4]] or [0]),-x[0]["id"]))
         ranking.remove(best);r,m,score,due,themes,reasons=best
         seen_positions.add(" ".join(r["fen"].split()[:4]))
         selected.append({"item_id":r["id"],"minutes":m,"reason":"review_due" if due else "new_practice","themes":themes,"priority":round(score,2),"reasons":reasons,"phase":r["phase"],"source":r["source"],"difficulty":r["difficulty"]})
