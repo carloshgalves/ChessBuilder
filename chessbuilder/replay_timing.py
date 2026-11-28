@@ -38,6 +38,9 @@ def annotate_timing(game,moves):
             difference=previous[color]+control[1]-current
             elapsed,source=(round(difference,3),"clock_delta") if difference>=0 else (None,None)
         else:elapsed,source=None,None
+        before=previous[color] if control else None
+        # Only a preceding recorded clock is evidence of time before a move.
+        move["clock_before"]=before
         previous[color]=current
         clocks[color]=current
         move.update({"color":color,"move_number":board.fullmove_number,"elapsed_seconds":elapsed,

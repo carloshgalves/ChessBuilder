@@ -134,3 +134,7 @@ O progresso é medido por avaliações efetivamente gravadas em SQLite, associad
 ### Replay e relógios
 
 A revisão usa a disposição de jogadores, relógios e linhas pareadas adaptada do ChessCupMotorSimulation. Ratings são os registrados na partida. O tempo gasto usa `%emt` quando disponível; caso contrário, para controle simples de incremento Fischer, estima pela diferença entre dois relógios consecutivos do mesmo jogador mais incremento. O primeiro lance de cada lado, lacunas, controles por etapas e partidas por correspondência não recebem estimativa. Nenhum relógio ausente é substituído por zero. Os PGNs já importados são suficientes, sem migração ou nova análise.
+
+### Gestão do tempo
+
+O relatório, disponível na Visão geral, usa os filtros existentes e uma amostra explícita de até 200 partidas recentes. As taxas de erro usam somente lances avaliados com relógio anterior conhecido. Tempos ausentes permanecem ausentes, ritmos são separados e o relatório não afirma causalidade. O replay oferece reprodução automática em quatro velocidades e parada opcional em erros críticos. As avaliações já gravadas são reutilizadas.
