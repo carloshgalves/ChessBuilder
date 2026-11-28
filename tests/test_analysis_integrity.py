@@ -87,3 +87,12 @@ def test_reimport_recovers_empty_duplicate(tmp_path,monkeypatch):
     g,p=next(parse('[White "A"]\n[Black "B"]\n[Result "*"]\n\n1. e4 e5 *'))
     assert not store(g,p,"chess.com","id")
     assert detail(1)["coverage"]["total"]==2
+
+def test_library_status_uses_saved_evaluations(tmp_path,monkeypatch):
+    from chessbuilder.review import games
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
+    enqueue(QueueRequest())
+    with connect() as c:c.execute("UPDATE jobs SET status='done',next_ply=2")
+    assert games(limit=50,offset=0)[0]["analysis_status"]=="unanalysed"
+    assert not games(status="done",limit=50,offset=0)
