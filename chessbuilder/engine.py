@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, model_validator
 from chessbuilder.db import connect
 from chessbuilder.importer import context_key,restore_empty_games
-from chessbuilder.integrity import saved_sql,total_sql,complete_sql,saved_plies,first_missing,reconcile_jobs
+from chessbuilder.integrity import saved_sql,total_sql,complete_sql,saved_plies,saved_ply,first_missing,reconcile_jobs
 
 router=APIRouter(prefix="/api")
 LEVELS={"quick":12000,"deep":120000,"detailed":350000}
@@ -87,8 +87,8 @@ def analyse_move(engine,board,move,settings,engine_id):
 def consistent_checkpoint(job,engine_id):
     with connect() as c:
         c.execute("BEGIN IMMEDIATE")
-        rows=c.execute("SELECT payload FROM move_analysis WHERE job_id=?",(job["id"],)).fetchall()
-        if any(json.loads(r[0]).get("engine")!=engine_id for r in rows):
+        rows=c.execute("SELECT payload FROM move_analysis WHERE job_id=? AND json_valid(payload)",(job["id"],)).fetchall()
+        if any(isinstance(p,dict) and p.get("engine") is not None and p["engine"]!=engine_id for r in rows if (p:=json.loads(r[0]))):
             c.execute("DELETE FROM move_analysis WHERE job_id=?",(job["id"],))
             c.execute("UPDATE jobs SET next_ply=1 WHERE id=?",(job["id"],))
             return 1
@@ -144,7 +144,9 @@ class Worker:
             if "UCI_ShowWDL" in engine.options: engine.configure({"UCI_ShowWDL":True})
             eid=identity(engine,path)
             consistent_checkpoint(job,eid)
-            with connect() as c:saved=saved_plies(c,job["id"])
+            with connect() as c:
+                saved=saved_plies(c,job["id"])
+                saved={r["ply"] for r in c.execute("SELECT ply,payload FROM move_analysis WHERE job_id=? AND json_valid(payload)",(job["id"],)) if r["ply"] in saved and json.loads(r["payload"]).get("engine")==eid}
             for row in moves:
                 move=chess.Move.from_uci(row["uci"])
                 if row["ply"] not in saved:
@@ -155,7 +157,7 @@ class Worker:
                         c.execute("BEGIN IMMEDIATE")
                         if c.execute("SELECT status FROM jobs WHERE id=?",(job["id"],)).fetchone()[0]!="running": return
                         c.execute("INSERT OR REPLACE INTO move_analysis VALUES(?,?,?)",(job["id"],row["ply"],json.dumps(result)))
-                        if row["ply"] not in saved_plies(c,job["id"]):raise ValueError("Avaliação inválida; checkpoint não avançou")
+                        if not saved_ply(c,job["id"],row["ply"]):raise ValueError("Avaliação inválida; checkpoint não avançou")
                         c.execute("UPDATE jobs SET next_ply=? WHERE id=?",(row["ply"]+1,job["id"]))
                 board.push(move)
             with connect() as c:

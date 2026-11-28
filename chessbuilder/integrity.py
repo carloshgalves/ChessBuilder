@@ -38,3 +38,6 @@ def reconcile_jobs(c):
         error="Partida sem lances no PGN" if not total else f"Análise incompleta: {saved}/{total} lances salvos"
         c.execute("UPDATE jobs SET status=?,next_ply=?,error=? WHERE id=?",("failed" if not total else "paused",next_ply,error,row["id"]))
     return len(rows)
+
+def saved_ply(c,job_id,ply):
+    return c.execute("SELECT 1 FROM move_analysis a JOIN jobs j ON j.id=a.job_id JOIN moves m ON m.game_id=j.game_id AND m.ply=a.ply WHERE a.job_id=? AND a.ply=? AND ("+valid_sql()+")",(job_id,ply)).fetchone() is not None

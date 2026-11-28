@@ -113,9 +113,12 @@ def store(game,raw,source="pgn",external_id=None,account=None,username=None,meta
     external_id=external_id or hashlib.sha256(raw.encode()).hexdigest()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        existing=conn.execute("SELECT id,player_color,account_id FROM games WHERE source=? AND external_id=?",(source,external_id)).fetchone()
+        existing=conn.execute("SELECT id,player_color,account_id,initial_fen,white,black FROM games WHERE source=? AND external_id=?",(source,external_id)).fetchone()
         if existing:
             link_account(conn,existing["id"],account,color)
+            if game.variations and existing["initial_fen"]==initial and existing["white"].casefold()==white.casefold() and existing["black"].casefold()==black.casefold() and not conn.execute("SELECT 1 FROM moves WHERE game_id=?",(existing["id"],)).fetchone():
+                write_moves(conn,existing["id"],game)
+                conn.execute("UPDATE games SET pgn=? WHERE id=?",(raw,existing["id"]))
             if existing["player_color"] is None and color is not None:
                 conn.execute("UPDATE games SET player_color=?,account_id=COALESCE(account_id,?) WHERE id=?",(color,account,existing["id"]))
             return False

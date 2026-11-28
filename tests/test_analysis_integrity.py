@@ -51,3 +51,39 @@ def test_worker_saves_and_reopens_after_restart(tmp_path,monkeypatch):
     assert d["coverage"]=={"saved":3,"total":3,"status":"complete"}
     assert d["metrics"]["white"]["analysed"]==2 and d["metrics"]["black"]["analysed"]==1
     with connect() as c:assert reconcile_jobs(c)==0
+
+def test_fake_worker_recovers_hole_and_persists(tmp_path,monkeypatch):
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[Result "*"]\n\n1. e4 e5 2. Nf3 *'));store(g,p)
+    enqueue(QueueRequest())
+    w=Worker();job=w.claim()
+    eid={"name":"fixture"}
+    calls=[]
+    class Engine:
+        options={}
+        def configure(self,*a):pass
+        def quit(self):pass
+    def payload(engine,b,m,s,identity):
+        calls.append(m.uci())
+        score={"cp":50,"mate":None,"pv":[m.uci()]}
+        return {"engine":identity,"settings":s.model_dump(),"perspective":"white" if b.turn else "black","best":score,"played":score,"alternatives":[score]}
+    monkeypatch.setattr("chessbuilder.engine.chess.engine.SimpleEngine.popen_uci",lambda *a,**kw:Engine())
+    monkeypatch.setattr("chessbuilder.engine.identity",lambda *a:eid)
+    monkeypatch.setattr("chessbuilder.engine.analyse_move",payload)
+    with connect() as c:
+        score={"cp":50,"mate":None,"pv":["g1f3"]}
+        a={"engine":eid,"perspective":"white","best":score,"played":score,"alternatives":[score]}
+        c.execute("INSERT INTO move_analysis VALUES(1,3,?)",(json.dumps(a),))
+        c.execute("INSERT INTO move_analysis VALUES(1,2,'not-json')")
+        c.execute("UPDATE jobs SET next_ply=4")
+    w.process(job,"fixture")
+    assert calls==["e2e4","e7e5"]
+    with connect() as c:assert c.execute("SELECT status,next_ply FROM jobs").fetchone()[:]==("done",4)
+    assert detail(1)["coverage"]=={"saved":3,"total":3,"status":"complete"}
+
+def test_reimport_recovers_empty_duplicate(tmp_path,monkeypatch):
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[White "A"]\n[Black "B"]\n[Result "*"]\n\n*'));store(g,p,"chess.com","id")
+    g,p=next(parse('[White "A"]\n[Black "B"]\n[Result "*"]\n\n1. e4 e5 *'))
+    assert not store(g,p,"chess.com","id")
+    assert detail(1)["coverage"]["total"]==2

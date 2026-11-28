@@ -50,6 +50,15 @@ def select_job(c,gid):
 def get_analyses(c,job):
     return {r["ply"]:json.loads(r["payload"]) for r in c.execute("SELECT a.ply,a.payload FROM move_analysis a JOIN jobs j ON j.id=a.job_id JOIN moves m ON m.game_id=j.game_id AND m.ply=a.ply WHERE a.job_id=? AND ("+valid_sql()+") ORDER BY a.ply",(job["id"],))} if job else {}
 
+def game_status_sql():
+    return ("CASE WHEN NOT EXISTS(SELECT 1 FROM moves m WHERE m.game_id=g.id) THEN 'no_moves' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND "+complete_sql()+") THEN 'done' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND j.status='running') THEN 'running' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND j.status='queued') THEN 'queued' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND "+saved_sql()+">0) THEN 'partial' "
+        "WHEN EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id AND j.status='failed') THEN 'failed' "
+        "ELSE 'unanalysed' END")
+
 def filters(source=None,speed=None,color=None,result=None,opening=None,search=None,start=None,end=None,status=None,account_id=None):
     clauses=[];args=[]
     for column,value in (("source",source),("speed",speed),("result",result)):
@@ -65,15 +74,14 @@ def filters(source=None,speed=None,color=None,result=None,opening=None,search=No
         clauses.append("(g.white LIKE ? OR g.black LIKE ?)");args.extend(["%"+search+"%"]*2)
     if start: clauses.append("g.played_at>=?");args.append(start)
     if end: clauses.append("substr(g.played_at,1,10)<=?");args.append(end)
-    if status=="unanalysed": clauses.append("NOT EXISTS(SELECT 1 FROM jobs j WHERE j.game_id=g.id)")
-    elif status: clauses.append("(SELECT status FROM jobs j WHERE j.game_id=g.id ORDER BY "+JOB_ORDER+" LIMIT 1)=?");args.append(status)
+    if status: clauses.append(game_status_sql()+"=?");args.append(status)
     return (" WHERE "+" AND ".join(clauses) if clauses else ""),args
 
 @router.get("/games")
 def games(source:str|None=None,speed:str|None=None,color:str|None=None,result:str|None=None,opening:str|None=None,search:str|None=None,start:str|None=None,end:str|None=None,status:str|None=None,account_id:int|None=None,limit:int=Query(100,ge=1,le=500),offset:int=Query(0,ge=0)):
     where,args=filters(source,speed,color,result,opening,search,start,end,status,account_id)
     with connect() as c:
-        rows=c.execute("SELECT g.id,g.source,g.played_at,g.speed,g.white,g.black,g.white_rating,g.black_rating,g.result,g.player_color,g.opening,g.eco,(SELECT status FROM jobs j WHERE j.game_id=g.id ORDER BY "+JOB_ORDER+" LIMIT 1) AS analysis_status FROM games g"+where+" ORDER BY g.played_at DESC,g.id DESC LIMIT ? OFFSET ?",(*args,limit,offset))
+        rows=c.execute("SELECT g.id,g.source,g.played_at,g.speed,g.white,g.black,g.white_rating,g.black_rating,g.result,g.player_color,g.opening,g.eco,"+game_status_sql()+" AS analysis_status FROM games g"+where+" ORDER BY g.played_at DESC,g.id DESC LIMIT ? OFFSET ?",(*args,limit,offset))
         result=[dict(r) for r in rows]
         if account_id is not None:
             for r in result:
