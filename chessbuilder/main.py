@@ -60,3 +60,6 @@ app.include_router(book_router)
 
 from chessbuilder.bots import router as bot_router
 app.include_router(bot_router)
+
+from chessbuilder.tournaments import router as tournament_router
+app.include_router(tournament_router)

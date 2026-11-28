@@ -44,7 +44,7 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 7:
+        if version > 8:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
@@ -60,6 +60,8 @@ def migrate(path=None):
             conn.executescript("BEGIN IMMEDIATE;"+BOOK_SCHEMA+"PRAGMA user_version=6; COMMIT;")
         if version < 7:
             conn.executescript("BEGIN IMMEDIATE;"+BOT_SCHEMA+"PRAGMA user_version=7; COMMIT;")
+        if version < 8:
+            conn.executescript("BEGIN IMMEDIATE;"+TOURNAMENT_SCHEMA+"PRAGMA user_version=8; COMMIT;")
 
 TRAINING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_items(
@@ -126,4 +128,10 @@ CREATE TABLE IF NOT EXISTS book_pages(material_id INTEGER NOT NULL REFERENCES bo
 BOT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS bot_games(id INTEGER PRIMARY KEY,settings TEXT NOT NULL,initial_fen TEXT NOT NULL,moves TEXT NOT NULL DEFAULT '[]',clocks TEXT NOT NULL,started_at TEXT NOT NULL,turn_started TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'running',result TEXT NOT NULL DEFAULT '*',reason TEXT,revision INTEGER NOT NULL DEFAULT 0,linked_game_id INTEGER REFERENCES games(id));
 CREATE TABLE IF NOT EXISTS bot_calibration(id INTEGER PRIMARY KEY,created_at TEXT NOT NULL,config TEXT NOT NULL,result TEXT NOT NULL);
+"""
+
+TOURNAMENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS tournaments(id INTEGER PRIMARY KEY,name TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,minutes INTEGER NOT NULL,increment INTEGER NOT NULL,rounds INTEGER NOT NULL,goal TEXT NOT NULL,player TEXT NOT NULL,initial_rating INTEGER,final_rating INTEGER,notes TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS tournament_rounds(tournament_id INTEGER NOT NULL REFERENCES tournaments(id),round INTEGER NOT NULL,opponent TEXT NOT NULL,color TEXT,result TEXT NOT NULL,opponent_rating INTEGER,notes TEXT NOT NULL,game_id INTEGER REFERENCES games(id),PRIMARY KEY(tournament_id,round));
+CREATE TABLE IF NOT EXISTS tournament_simulations(tournament_id INTEGER NOT NULL REFERENCES tournaments(id),bot_game_id INTEGER NOT NULL UNIQUE REFERENCES bot_games(id),PRIMARY KEY(tournament_id,bot_game_id));
 """
