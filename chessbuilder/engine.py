@@ -18,6 +18,8 @@ from chessbuilder.integrity import saved_sql,total_sql,complete_sql,saved_plies,
 router=APIRouter(prefix="/api")
 LEVELS={"quick":12000,"deep":120000,"detailed":350000}
 ANALYSIS_PROTOCOL=2
+# The interactive workspace and batch worker share a search slot.
+ENGINE_SEARCH_LOCK=threading.Lock()
 class Settings(BaseModel):
     level:str="quick"
     threads:int=Field(default=2,ge=1,le=8)
@@ -152,7 +154,9 @@ class Worker:
                 if row["ply"] not in saved:
                     with connect() as c: status=c.execute("SELECT status FROM jobs WHERE id=?",(job["id"],)).fetchone()[0]
                     if self.shutdown.is_set() or status!="running": return
-                    result=analyse_move(engine,board,move,s,eid)
+                    with ENGINE_SEARCH_LOCK:
+                        if self.shutdown.is_set():return
+                        result=analyse_move(engine,board,move,s,eid)
                     with connect() as c:
                         c.execute("BEGIN IMMEDIATE")
                         if c.execute("SELECT status FROM jobs WHERE id=?",(job["id"],)).fetchone()[0]!="running": return
