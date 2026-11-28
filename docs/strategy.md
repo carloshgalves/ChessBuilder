@@ -1,0 +1,2 @@
+# Strategic diagnostics v1
+Features are deterministic proxies, not calibrated chess judgments. Matched legal PVs compare positional indicators at plies 1, 3, 5; shallow, short, tactical, mate and material-divergent lines abstain. Persistent contrasts enter separate strategy-prefixed competence denominators and exercise themes. Exchanges/material compensation are descriptive, not asserted causes. Negative and ambiguous synthetic fixtures are included; no independent corpus precision or causal validation is claimed.

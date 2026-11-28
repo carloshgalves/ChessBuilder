@@ -88,15 +88,18 @@ def generate(body:Generate):
                         else:
                             d=diagnose(b,m,a)
                             themes=[f["theme"] for f in d["findings"] if f["confidence"]=="line_witness" and f["kind"] in ("missed","allowed")]
+                            from chessbuilder.strategy import diagnose_strategy
+                            strategic=diagnose_strategy(b,m,a)
+                            themes.extend(f["theme"] for f in strategic["findings"] if f["kind"]=="missed")
                             kind="mate" if (a["best"].get("mate") or 0)>0 else "defense" if met["before"]<55 else "conversion" if met["before"]>=75 else "best_move"
-                            evidence={"diagnosis":d,"loss_pp":met["win_loss"],"played":m.uci(),"reference":a["best"],"analysis_digest":digest(a),"game_id":g["id"],"ply":row["ply"],"mode":"first"}
+                            evidence={"diagnosis":d,"strategy":strategic,"loss_pp":met["win_loss"],"played":m.uci(),"reference":a["best"],"analysis_digest":digest(a),"game_id":g["id"],"ply":row["ply"],"mode":"first"}
                             def add_exercise(position,exercise_kind,lines,labels,details):
                                 nonlocal added
                                 initial=position.root().fen(en_passant="fen")
                                 history=json.dumps([x.uci() for x in position.move_stack])
                                 duplicate=c.execute("SELECT 1 FROM training_items WHERE active=1 AND source='personal' AND initial_fen=? AND history=? AND kind=? AND game_id<>?",(initial,history,exercise_kind,g["id"])).fetchone()
                                 if duplicate:return
-                                key=digest([VERSION,g["id"],row["ply"],digest(a),exercise_kind])
+                                key=digest([VERSION,"strategy-v1",g["id"],row["ply"],digest(a),exercise_kind])
                                 added+=insert_item(c,"personal",g["id"],row["ply"],job["id"],position,exercise_kind,labels or ["unclassified"],lines,details,None,key)
                                 c.execute("UPDATE training_items SET active=1 WHERE item_key=?",(key,))
                             add_exercise(b,kind,solutions,themes,evidence)

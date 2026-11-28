@@ -40,6 +40,9 @@ def game_observations(c,games):
                         coverage["analysed_plies"]+=1
                         d=diagnose(b,move,a)
                         findings=[f for f in d["findings"] if f["confidence"]=="line_witness" and f["kind"] in ("missed","allowed","exploited")]
+                        from chessbuilder.strategy import diagnose_strategy
+                        strategic=diagnose_strategy(b,move,a)
+                        findings.extend(strategic["findings"])
                         if findings:coverage["witnessed_plies"]+=1
                         rows.append({"game_id":g["id"],"ply":r["ply"],"date":g["played_at"],"speed":g["speed"],"phase":phase(b),"loss":m["win_loss"],"expected_loss":m["expected_score_loss"],"findings":findings})
             b.push(move)
