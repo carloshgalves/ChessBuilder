@@ -65,6 +65,37 @@ def link_account(conn,gid,account,color):
         conn.execute("""INSERT INTO game_accounts(game_id,account_id,player_color) VALUES(?,?,?)
             ON CONFLICT(game_id,account_id) DO UPDATE SET player_color=COALESCE(game_accounts.player_color,excluded.player_color)""",(gid,account,color))
 
+def write_moves(conn,game_id,game):
+    board=game.board()
+    for ply,node in enumerate(game.mainline(),1):
+        fen=board.fen()
+        key=context_key(board)
+        conn.execute("INSERT OR IGNORE INTO positions(fen,history_key) VALUES(?,?)",(fen,key))
+        pos=conn.execute("SELECT id FROM positions WHERE history_key=?",(key,)).fetchone()[0]
+        san=board.san(node.move)
+        board.push(node.move)
+        conn.execute("INSERT INTO moves VALUES(?,?,?,?,?,?,?)",(game_id,ply,pos,san,node.move.uci(),board.fen(),node.clock()))
+
+def restore_empty_games():
+    # Only reconstruct from a complete, locally stored, matching PGN.
+    # Preserve genuine zero-move games and all existing nonempty histories.
+    with connect() as c:
+        ids=[r[0] for r in c.execute("SELECT id FROM games g WHERE NOT EXISTS(SELECT 1 FROM moves m WHERE m.game_id=g.id)")]
+    restored=0
+    for gid in ids:
+        with connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            g=c.execute("SELECT initial_fen,pgn,white,black FROM games WHERE id=?",(gid,)).fetchone()
+            if not g or c.execute("SELECT 1 FROM moves WHERE game_id=?",(gid,)).fetchone():continue
+            try:
+                parsed=list(parse(g["pgn"]))
+                if len(parsed)!=1:continue
+                game,_=parsed[0]
+                if game.errors or not game.board().is_valid() or game.board().fen()!=g["initial_fen"] or game.headers.get("White","?")!=g["white"] or game.headers.get("Black","?")!=g["black"] or not game.variations:continue
+            except (ValueError,TypeError):continue
+            write_moves(c,gid,game);restored+=1
+    return restored
+
 def store(game,raw,source="pgn",external_id=None,account=None,username=None,meta=None):
     if game.errors:
         raise ValueError("PGN inválido: "+str(game.errors[0]))
@@ -92,14 +123,7 @@ def store(game,raw,source="pgn",external_id=None,account=None,username=None,meta
             (source,external_id,account,meta.get("played_at") or game_date(h),meta.get("speed") or speed(control),white,black,integer(h.get("WhiteElo")),integer(h.get("BlackElo")),h.get("Result","*"),color,h.get("Opening") or opening_name(meta.get("opening") or h.get("ECOUrl")),h.get("ECO"),meta.get("termination") or h.get("Termination"),initial,raw,control))
         game_id=cur.lastrowid
         link_account(conn,game_id,account,color)
-        for ply,node in enumerate(game.mainline(),1):
-            fen=board.fen()
-            key=context_key(board)
-            conn.execute("INSERT OR IGNORE INTO positions(fen,history_key) VALUES(?,?)",(fen,key))
-            pos=conn.execute("SELECT id FROM positions WHERE history_key=?",(key,)).fetchone()[0]
-            san=board.san(node.move)
-            board.push(node.move)
-            conn.execute("INSERT INTO moves VALUES(?,?,?,?,?,?,?)",(game_id,ply,pos,san,node.move.uci(),board.fen(),node.clock()))
+        write_moves(conn,game_id,game)
     return True
 
 def account_id(source,username):

@@ -4,6 +4,7 @@ import chess
 from fastapi import APIRouter,HTTPException,Query
 from fastapi.responses import PlainTextResponse
 from chessbuilder.db import connect
+from chessbuilder.integrity import saved_sql,total_sql,complete_sql,valid_sql
 router=APIRouter(prefix="/api")
 
 METRIC_VERSION="win-loss-mean-v2"
@@ -42,12 +43,12 @@ def summarize(analyses):
         result[color]={"accuracy":mean([m["accuracy"] for m in vals]),"acpl":mean([m["cp_loss"] for m in vals if m["cp_loss"] is not None]),"expected_score_loss":mean([m["expected_score_loss"] for m in vals if m["expected_score_loss"] is not None]),"analysed":len(vals)}
     return result
 
-JOB_ORDER="CASE status WHEN 'done' THEN 0 ELSE 1 END, next_ply DESC, CASE json_extract(settings,'$.level') WHEN 'detailed' THEN 2 WHEN 'deep' THEN 1 ELSE 0 END DESC, id DESC"
+JOB_ORDER="CASE WHEN "+complete_sql()+" THEN 0 ELSE 1 END, "+saved_sql()+" DESC, CASE json_extract(j.settings,'$.level') WHEN 'detailed' THEN 2 WHEN 'deep' THEN 1 ELSE 0 END DESC, j.id DESC"
 def select_job(c,gid):
-    return c.execute("SELECT * FROM jobs WHERE game_id=? AND next_ply>1 ORDER BY "+JOB_ORDER+" LIMIT 1",(gid,)).fetchone()
+    return c.execute("SELECT j.* FROM jobs j WHERE j.game_id=? AND "+saved_sql()+">0 ORDER BY "+JOB_ORDER+" LIMIT 1",(gid,)).fetchone()
 
 def get_analyses(c,job):
-    return {r["ply"]:json.loads(r["payload"]) for r in c.execute("SELECT ply,payload FROM move_analysis WHERE job_id=? ORDER BY ply",(job["id"],))} if job else {}
+    return {r["ply"]:json.loads(r["payload"]) for r in c.execute("SELECT a.ply,a.payload FROM move_analysis a JOIN jobs j ON j.id=a.job_id JOIN moves m ON m.game_id=j.game_id AND m.ply=a.ply WHERE a.job_id=? AND ("+valid_sql()+") ORDER BY a.ply",(job["id"],))} if job else {}
 
 def filters(source=None,speed=None,color=None,result=None,opening=None,search=None,start=None,end=None,status=None,account_id=None):
     clauses=[];args=[]
@@ -101,6 +102,8 @@ def detail(game_id:int):
         moves=[dict(r) for r in c.execute("SELECT * FROM moves WHERE game_id=? ORDER BY ply",(game_id,))]
         job=select_job(c,game_id)
         analyses=get_analyses(c,job)
+        active=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
+        latest=c.execute("SELECT id,status,error FROM jobs WHERE game_id=? ORDER BY id DESC LIMIT 1",(game_id,)).fetchone()
     from chessbuilder.tactics import diagnose
     from chessbuilder.strategy import diagnose_strategy
     board=chess.Board(game["initial_fen"])
@@ -115,7 +118,7 @@ def detail(game_id:int):
             move["played_line"]=line(board,a["played"]["pv"])
             move["variations"]=[line(board,v["pv"]) for v in a["alternatives"]]
         board.push_uci(move["uci"])
-    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION}
+    return {"game":{k:game[k] for k in game.keys() if k!="pgn"},"moves":moves,"job":dict(job) if job else None,"metrics":summarize(analyses.values()),"metric_version":METRIC_VERSION,"coverage":{"saved":len(analyses),"total":len(moves),"status":"no_moves" if not moves else "complete" if len(analyses)==len(moves) else "partial" if analyses else "unanalysed"},"active_job":dict(active) if active else None,"latest_job":dict(latest) if latest else None}
 
 @router.get("/games/{game_id}/pgn",response_class=PlainTextResponse)
 def export(game_id:int):

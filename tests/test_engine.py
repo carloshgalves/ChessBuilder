@@ -54,7 +54,7 @@ def test_checkpoint_restarts_for_changed_engine(tmp_path,monkeypatch):
     enqueue(QueueRequest())
     job=Worker().claim()
     with connect() as c:
-        c.execute("INSERT INTO move_analysis VALUES(?,?,?)",(job["id"],1,json.dumps({"engine":{"name":"old"}})))
+        c.execute("INSERT INTO move_analysis VALUES(?,?,?)",(job["id"],1,json.dumps({"engine":{"name":"old"},"perspective":"white","best":{"cp":50,"pv":["e2e4"]},"played":{"cp":50,"pv":["e2e4"]},"alternatives":[]})))
         c.execute("UPDATE jobs SET next_ply=2 WHERE id=?",(job["id"],))
     job["next_ply"]=2
     assert consistent_checkpoint(job,{"name":"old"})==2
@@ -94,7 +94,9 @@ def test_skip_completed_and_explicit_reanalysis(tmp_path,monkeypatch):
     monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
     g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
     enqueue(QueueRequest())
-    with connect() as c:c.execute("UPDATE jobs SET status='done',next_ply=2")
+    with connect() as c:
+        c.execute("UPDATE jobs SET status='done',next_ply=2")
+        persist_fixture(c,1,1)
     assert preview(QueueRequest(level="deep"))["eligible"]==1
     assert preview(QueueRequest())["excluded"]=={"completed":1}
     assert enqueue(QueueRequest(game_id=1,level="deep"))["queued"]==1
@@ -121,6 +123,7 @@ def test_depth_coverage_and_exclusion_reasons(tmp_path,monkeypatch):
         store(g,p,"pgn",str(i),meta={"speed":"rapid","played_at":"2026-11-01T00:00:00+00:00"})
     with connect() as c:
         c.executemany("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(?,?,'done',3)",[(i,settings_json(Settings(level="quick"))) for i in range(1,18)])
+        for i in range(1,18):persist_fixture(c,i,i)
         c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,'cancelled',2)",(settings_json(Settings(level="deep")),))
     q=QueueRequest(speed="rapid",start="2026-10-28",end="2026-11-28",level="deep")
     p=preview(q)
@@ -133,8 +136,18 @@ def test_deeper_completed_and_multipv_coverage(tmp_path,monkeypatch):
     from chessbuilder.engine import preview,settings_json
     monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
     g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
-    with connect() as c:c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,'done',2)",(settings_json(Settings(level="deep",multipv=2)),))
+    with connect() as c:
+        c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,'done',2)",(settings_json(Settings(level="deep",multipv=2)),))
+        persist_fixture(c,1,1)
     assert preview(QueueRequest(level="quick"))["excluded"]=={"completed":1}
     assert preview(QueueRequest(level="deep",multipv=3))["eligible"]==1
     assert preview(QueueRequest(level="detailed"))["eligible"]==1
     assert preview(QueueRequest(level="deep",skip_completed=False))["excluded"]=={"completed":1}
+
+
+def persist_fixture(c,job_id,game_id):
+    import json
+    for row in c.execute("SELECT ply,uci FROM moves WHERE game_id=? ORDER BY ply",(game_id,)).fetchall():
+        score={"cp":50,"mate":None,"pv":[row["uci"]]}
+        a={"perspective":"white" if row["ply"]%2 else "black","best":score,"played":score,"alternatives":[score],"engine":{"name":"fixture"}}
+        c.execute("INSERT OR REPLACE INTO move_analysis VALUES(?,?,?)",(job_id,row["ply"],json.dumps(a)))
