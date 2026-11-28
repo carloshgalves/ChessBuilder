@@ -19,3 +19,10 @@ def test_time_report_uses_prior_clock_and_personal_seat(tmp_path,monkeypatch):
     assert g["clock_before_known"]==1 and g["buckets"][0]["critical"]==1 and g["buckets"][0]["analysed"]==1
     assert g["buckets"][1]["critical_rate"] is None
     assert time_management(speed="rapid",limit=25)["groups"]==[]
+
+def test_correspondence_clock_not_used_as_pre_move_budget(tmp_path,monkeypatch):
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[White "Alice"]\n[Black "Bob"]\n[TimeControl "86400"]\n\n1. e4 {[%clk 23:00:00]} e5 2. Nf3 {[%clk 22:00:00]} *'))
+    store(g,p,"chess.com","daily",username="Alice",meta={"speed":"daily"})
+    r=time_management(limit=25)["groups"][0]
+    assert r["timed"]==0 and r["clock_before_known"]==0
