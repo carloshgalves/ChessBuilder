@@ -50,8 +50,8 @@ def catalog():
     with connect() as c:
         rows={r["edition"]:dict(r) for r in c.execute("""SELECT c.id,c.edition,COUNT(e.game_id) AS imported
             FROM historical_corpora c LEFT JOIN historical_entries e ON e.corpus_id=c.id
-            WHERE c.edition LIKE 'Champion:%' AND c.provenance LIKE ?
-            GROUP BY c.id""",(SOURCE+"%",))}
+            WHERE c.edition LIKE 'Champion:%' AND c.provenance = ? || substr(c.edition,10) || '.zip'
+            GROUP BY c.id""",(SOURCE,))}
     return [{"slug":slug,"name":name,"reign":reign,"category":"classical" if i<18 else "fide_split","source":SOURCE+slug+".zip",
         "corpus_id":rows.get("Champion:"+slug,{}).get("id"),"imported":rows.get("Champion:"+slug,{}).get("imported",0)} for i,(slug,name,reign) in enumerate(CHAMPIONS)]
 @router.post("/{slug}/download")
