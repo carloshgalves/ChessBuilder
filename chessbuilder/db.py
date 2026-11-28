@@ -44,7 +44,7 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 5:
+        if version > 6:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
@@ -56,6 +56,8 @@ def migrate(path=None):
             conn.executescript("BEGIN IMMEDIATE;"+REPETITION_SCHEMA+"PRAGMA user_version=4; COMMIT;")
         if version < 5:
             conn.executescript("BEGIN IMMEDIATE;"+HISTORICAL_SCHEMA+"PRAGMA user_version=5; COMMIT;")
+        if version < 6:
+            conn.executescript("BEGIN IMMEDIATE;"+BOOK_SCHEMA+"PRAGMA user_version=6; COMMIT;")
 
 TRAINING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_items(
@@ -111,4 +113,10 @@ CREATE INDEX IF NOT EXISTS review_due ON review_schedule(due_at);
 HISTORICAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS historical_corpora(id INTEGER PRIMARY KEY, edition TEXT NOT NULL, provenance TEXT NOT NULL, expected_games INTEGER, UNIQUE(edition,provenance));
 CREATE TABLE IF NOT EXISTS historical_entries(corpus_id INTEGER NOT NULL REFERENCES historical_corpora(id), game_id INTEGER NOT NULL REFERENCES games(id), event TEXT, round TEXT, PRIMARY KEY(corpus_id,game_id));
+"""
+
+BOOK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS book_materials(id INTEGER PRIMARY KEY,title TEXT NOT NULL,provenance TEXT NOT NULL,format TEXT NOT NULL,digest TEXT NOT NULL UNIQUE,pages INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS book_candidates(id INTEGER PRIMARY KEY,material_id INTEGER NOT NULL REFERENCES book_materials(id),label TEXT NOT NULL,page INTEGER,solution_page INTEGER,fen TEXT,author_lines TEXT NOT NULL DEFAULT '[]',engine_lines TEXT NOT NULL DEFAULT '[]',note TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'draft',item_id INTEGER REFERENCES training_items(id),UNIQUE(material_id,label));
+CREATE TABLE IF NOT EXISTS book_pages(material_id INTEGER NOT NULL REFERENCES book_materials(id),page INTEGER NOT NULL,text TEXT NOT NULL,PRIMARY KEY(material_id,page));
 """

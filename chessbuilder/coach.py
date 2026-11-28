@@ -86,7 +86,7 @@ def attempt_stats(c):
         n=len(xs);k=sum(r["correct"]==1 and r["hints"]==0 for r in xs)
         return {"attempts":n,"unassisted_correct":k,"rate":round(k/n,4) if n else None}
     by_source={}
-    for source in ("personal","lichess","endgame","opening","endgame_recognition","historical"):
+    for source in ("personal","lichess","endgame","opening","endgame_recognition","historical","book"):
         by_source[source]={"novel":stats([r for r in first if r["source"]==source]),"repeat":stats([r for r in repeat if r["source"]==source])}
     last_by_position={};delayed=[]
     for r in rows:
@@ -173,7 +173,7 @@ def select_plan(c,body,day):
         (SELECT COUNT(*) FROM training_attempts a WHERE a.item_id=t.id AND a.finished_at IS NOT NULL) AS attempted,
         (SELECT MAX(a.finished_at) FROM training_attempts a WHERE a.item_id=t.id AND a.finished_at IS NOT NULL) AS last_attempt,
         (SELECT a.correct FROM training_attempts a WHERE a.item_id=t.id AND a.finished_at IS NOT NULL ORDER BY a.finished_at DESC,a.id DESC LIMIT 1) AS last_correct
-        FROM training_items t LEFT JOIN games g ON g.id=t.game_id LEFT JOIN review_schedule s ON s.item_id=t.id WHERE t.active=1 AND (? IS NULL OR t.source IN ('lichess','endgame','opening','historical') OR g.speed=?) ORDER BY t.id""",(body.speed,body.speed)).fetchall()
+        FROM training_items t LEFT JOIN games g ON g.id=t.game_id LEFT JOIN review_schedule s ON s.item_id=t.id WHERE t.active=1 AND (? IS NULL OR t.source IN ('lichess','endgame','opening','historical','book') OR g.speed=?) ORDER BY t.id""",(body.speed,body.speed)).fetchall()
     ranking=[]
     for r in candidates:
         themes=json.loads(r["themes"]);minutes=8 if r["source"]=="endgame" else 4 if r["kind"] in ("calculation","conversion") else 3
