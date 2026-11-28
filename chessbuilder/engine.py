@@ -1,4 +1,6 @@
 import hashlib
+from datetime import date
+from typing import Literal
 import json
 import math
 import os
@@ -8,7 +10,7 @@ from pathlib import Path
 import chess
 import chess.engine
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from chessbuilder.db import connect
 from chessbuilder.importer import context_key
 
@@ -150,24 +152,125 @@ class Worker:
             if self.shutdown.is_set():
                 with connect() as c: c.execute("UPDATE jobs SET status='queued' WHERE id=? AND status='running'",(job["id"],))
 
-class QueueRequest(Settings):
-    game_id:int|None=None
+class Scope(BaseModel):
+    account_id:int|None=Field(default=None,ge=1)
+    source:str|None=Field(default=None,max_length=32)
+    speed:str|None=Field(default=None,max_length=32)
+    start:date|None=None
+    end:date|None=None
+    @model_validator(mode="after")
+    def dates(self):
+        if self.start and self.end and self.start>self.end:raise ValueError("Período inválido")
+        return self
+
+class QueueRequest(Settings,Scope):
+    game_id:int|None=Field(default=None,ge=1)
+    limit:int=Field(default=100,ge=1,le=10000)
+    order:Literal["recent","oldest"]="recent"
+    include_interrupted:bool=True
+    skip_completed:bool=True
+
+def scope_where(body,alias="g"):
+    clauses=[];args=[]
+    for key in ("account_id","source","speed"):
+        value=getattr(body,key)
+        if value is not None:
+            clauses.append(f"{alias}.{key}=?");args.append(value)
+    if body.start:
+        clauses.append(f"{alias}.played_at>=?");args.append(body.start.isoformat())
+    if body.end:
+        clauses.append(f"substr({alias}.played_at,1,10)<=?");args.append(body.end.isoformat())
+    return clauses,args
+
+def selection(c,body,settings):
+    clauses,args=scope_where(body)
+    if body.game_id is not None:
+        if not c.execute("SELECT 1 FROM games WHERE id=?",(body.game_id,)).fetchone():raise HTTPException(404,"Partida não encontrada")
+        clauses.append("g.id=?");args.append(body.game_id)
+    elif body.source is None:
+        clauses.append("g.source!='historical'")
+    where=" AND ".join(clauses) or "1=1"
+    # Completed shallow jobs do not satisfy a deeper request. Resources
+    # (threads/hash) are not depth; MultiPV coverage is a separate requirement.
+    # A completed exact-settings job remains immutable under every policy.
+    depth={"quick":1,"deep":2,"detailed":3}[body.level]
+    reason="""CASE
+      WHEN NOT EXISTS(SELECT 1 FROM moves m WHERE m.game_id=g.id) THEN 'no_moves'
+      WHEN EXISTS(SELECT 1 FROM jobs active WHERE active.game_id=g.id AND active.status IN ('queued','running')) THEN 'active'
+      WHEN j.status='done' THEN 'completed'
+      WHEN ? AND EXISTS(SELECT 1 FROM jobs complete WHERE complete.game_id=g.id AND complete.status='done'
+        AND CASE json_extract(complete.settings,'$.level') WHEN 'quick' THEN 1 WHEN 'deep' THEN 2 WHEN 'detailed' THEN 3 ELSE 0 END >= ?
+        AND COALESCE(json_extract(complete.settings,'$.multipv'),1)>=?
+        AND (?=0 OR json_extract(complete.settings,'$.level') IN ('deep','detailed') OR COALESCE(json_extract(complete.settings,'$.auto_deepen'),1)=1))
+        THEN 'completed'
+      WHEN j.status IN ('paused','failed','cancelled') AND NOT ? THEN 'interrupted_disabled'
+      ELSE 'eligible' END"""
+    params=[int(body.skip_completed and body.game_id is None),depth,body.multipv,int(body.level=="quick" and body.auto_deepen),int(body.include_interrupted),settings,*args]
+    cte="WITH candidates AS (SELECT g.id,g.white,g.black,g.played_at,g.speed,g.source,j.id AS job_id,j.status AS job_status,"+reason+""" AS reason,
+       EXISTS(SELECT 1 FROM jobs old WHERE old.game_id=g.id AND old.status IN ('paused','failed','cancelled') AND old.settings!=?) AS other_interrupted,
+       EXISTS(SELECT 1 FROM jobs old WHERE old.game_id=g.id AND old.status='done') AS prior_completed
+       FROM games g LEFT JOIN jobs j ON j.game_id=g.id AND j.settings=? WHERE """+where+") "
+    params.insert(5,settings)
+    counts={r[0]:r[1] for r in c.execute(cte+"SELECT reason,COUNT(*) FROM candidates GROUP BY reason",params)}
+    count=counts.get("eligible",0)
+    direction="DESC" if body.order=="recent" else "ASC"
+    rows=c.execute(cte+f"SELECT * FROM candidates WHERE reason='eligible' ORDER BY played_at IS NULL,played_at {direction},id {direction} LIMIT ?",(*params,1 if body.game_id is not None else body.limit)).fetchall()
+    return sum(counts.values()),count,rows,counts
+
+def selection_summary(matched,count,rows,counts):
+    resumed=sum(r["job_id"] is not None for r in rows)
+    return {"matched":matched,"eligible":count,"selected":len(rows),"new":len(rows)-resumed,"resumable":resumed,
+            "remaining":max(0,count-len(rows)),"excluded":{k:v for k,v in counts.items() if k!="eligible"},
+            "upgrades":sum(r["job_id"] is None and r["prior_completed"] for r in rows),
+            "other_interrupted":sum(r["job_id"] is None and r["other_interrupted"] for r in rows),
+            "sample":[{k:r[k] for k in ("id","white","black","played_at","speed","source","job_status")} for r in rows[:10]]}
+
+@router.post("/analysis/preview")
+def preview(body:QueueRequest):
+    settings=settings_json(Settings.model_validate(body.model_dump()))
+    with connect() as c:
+        c.execute("BEGIN")
+        return selection_summary(*selection(c,body,settings))
 
 @router.post("/analysis/queue")
 def enqueue(body:QueueRequest):
     settings=settings_json(Settings.model_validate(body.model_dump()))
     with connect() as c:
-        if body.game_id is not None and not c.execute("SELECT 1 FROM games WHERE id=?",(body.game_id,)).fetchone(): raise HTTPException(404,"Partida não encontrada")
-        c.execute("INSERT OR IGNORE INTO jobs(game_id,settings,status,priority) SELECT id,?,'queued',? FROM games WHERE (? IS NULL OR id=?) AND (? IS NOT NULL OR source!='historical')",(settings,int(body.game_id is not None),body.game_id,body.game_id,body.game_id))
-        queued=c.execute("SELECT changes()").fetchone()[0]
+        c.execute("BEGIN IMMEDIATE")
+        matched,count,rows,counts=selection(c,body,settings)
+        summary=selection_summary(matched,count,rows,counts)
+        queued=resumed=0
+        for r in rows:
+            if r["job_id"] is None:
+                c.execute("INSERT INTO jobs(game_id,settings,status,priority) VALUES(?,?,'queued',?)",(r["id"],settings,1 if body.game_id is not None else 0))
+                queued+=1
+            else:
+                c.execute("UPDATE jobs SET status='queued',error=NULL,priority=? WHERE id=?",(1 if body.game_id is not None else 0,r["job_id"]))
+                resumed+=1
+        # Keep an already queued explicit per-game request prioritized.
         if body.game_id is not None:
             c.execute("UPDATE jobs SET priority=1 WHERE game_id=? AND settings=? AND status='queued'",(body.game_id,settings))
-        return {"queued":queued}
+        return {**summary,"queued":queued,"resumed":resumed}
+
+class BulkRequest(Scope):
+    action:Literal["pause","cancel"]
+    all_jobs:bool=False
+@router.post("/analysis/bulk")
+def bulk_control(body:BulkRequest):
+    clauses,args=scope_where(body)
+    if not clauses and not body.all_jobs:raise HTTPException(422,"Confirme o controle global da fila")
+    if body.all_jobs and clauses:raise HTTPException(422,"Escolha escopo global ou filtros")
+    target="paused" if body.action=="pause" else "cancelled"
+    statuses="('queued','running')" if body.action=="pause" else "('queued','running','paused','failed')"
+    with connect() as c:
+        c.execute("BEGIN IMMEDIATE")
+        c.execute(f"UPDATE jobs SET status=?,error=NULL WHERE status IN {statuses} AND game_id IN (SELECT g.id FROM games g WHERE "+(" AND ".join(clauses) or "1=1")+")",(target,*args))
+        return {"changed":c.execute("SELECT changes()").fetchone()[0],"status":target}
 
 @router.get("/analysis/jobs")
 def jobs():
     with connect() as c:
-        rows=c.execute("SELECT j.*,g.white,g.black,(SELECT COUNT(*) FROM moves m WHERE m.game_id=j.game_id) AS total_plies FROM jobs j JOIN games g ON g.id=j.game_id ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,j.id DESC LIMIT 200").fetchall()
+        rows=c.execute("SELECT j.*,g.white,g.black,g.account_id,g.source,g.speed,g.played_at,(SELECT COUNT(*) FROM moves m WHERE m.game_id=j.game_id) AS total_plies FROM jobs j JOIN games g ON g.id=j.game_id ORDER BY CASE j.status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 WHEN 'paused' THEN 2 WHEN 'failed' THEN 3 ELSE 4 END,j.priority DESC,g.played_at DESC,j.id DESC LIMIT 200").fetchall()
         counts={r[0]:r[1] for r in c.execute("SELECT status,COUNT(*) FROM jobs GROUP BY status")}
         return {"engine_available":bool(executable()),"temperatures_c":temperatures(),"counts":counts,"jobs":[dict(r) for r in rows]}
 

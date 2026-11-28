@@ -62,3 +62,66 @@ def test_checkpoint_restarts_for_changed_engine(tmp_path,monkeypatch):
     with connect() as c:
         assert c.execute("SELECT COUNT(*) FROM move_analysis").fetchone()[0]==0
         assert c.execute("SELECT next_ply FROM jobs").fetchone()[0]==1
+
+def test_selective_batch_and_bulk_pause(tmp_path,monkeypatch):
+    from chessbuilder.engine import preview,bulk_control,BulkRequest
+    from chessbuilder.importer import account_id
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    aa=account_id("chess.com","Alice")["id"];bb=account_id("lichess","Bob")["id"]
+    for i,(account,source,speed,day) in enumerate([(aa,"chess.com","rapid","2026-01-01"),(aa,"chess.com","rapid","2026-01-02"),(aa,"chess.com","rapid","2026-01-03"),(aa,"chess.com","blitz","2026-01-03"),(bb,"lichess","rapid","2026-01-02"),(aa,"chess.com","rapid","2025-12-31")]):
+        g,p=next(parse('[White "Alice"]\n[Black "Bob"]\n[Result "*"]\n\n1. e4 e5 *'))
+        store(g,p,source,str(i),account,meta={"speed":speed,"played_at":day+"T23:59:59+00:00"})
+    q=QueueRequest(account_id=aa,speed="rapid",start="2026-01-01",end="2026-01-03",limit=2)
+    p=preview(q)
+    assert (p["matched"],p["eligible"],p["selected"])==(3,3,2)
+    assert [x["id"] for x in p["sample"]]==[3,2]
+    with connect() as c:assert c.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]==0
+    assert enqueue(q)["queued"]==2
+    assert enqueue(q)["queued"]==1
+    assert enqueue(q)["queued"]==0
+    job=Worker().claim()
+    with connect() as c:c.execute("UPDATE jobs SET next_ply=2 WHERE id=?",(job["id"],))
+    assert bulk_control(BulkRequest(action="pause",all_jobs=True))["changed"]==3
+    r=enqueue(q.model_copy(update={"limit":1}))
+    assert r["resumed"]==1 and r["queued"]==0
+    with connect() as c:
+        assert c.execute("SELECT next_ply,status FROM jobs WHERE id=?",(job["id"],)).fetchone()[:]==(2,"queued")
+        assert c.execute("SELECT COUNT(*) FROM jobs WHERE status='paused'").fetchone()[0]==2
+    assert bulk_control(BulkRequest(action="cancel",account_id=aa,speed="rapid"))["changed"]==3
+
+def test_skip_completed_and_explicit_reanalysis(tmp_path,monkeypatch):
+    from chessbuilder.engine import preview
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
+    enqueue(QueueRequest())
+    with connect() as c:c.execute("UPDATE jobs SET status='done',next_ply=2")
+    assert preview(QueueRequest(level="deep"))["eligible"]==1
+    assert preview(QueueRequest())["excluded"]=={"completed":1}
+    assert enqueue(QueueRequest(game_id=1,level="deep"))["queued"]==1
+    assert enqueue(QueueRequest(game_id=1,level="deep"))["queued"]==0
+
+def test_depth_coverage_and_exclusion_reasons(tmp_path,monkeypatch):
+    from chessbuilder.engine import preview,settings_json
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    for i in range(17):
+        g,p=next(parse('[Result "*"]\n\n1. e4 e5 *'))
+        store(g,p,"pgn",str(i),meta={"speed":"rapid","played_at":"2026-11-01T00:00:00+00:00"})
+    with connect() as c:
+        c.executemany("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(?,?,'done',3)",[(i,settings_json(Settings(level="quick"))) for i in range(1,18)])
+        c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,'cancelled',2)",(settings_json(Settings(level="deep")),))
+    q=QueueRequest(speed="rapid",start="2026-10-28",end="2026-11-28",level="deep")
+    p=preview(q)
+    assert (p["matched"],p["eligible"],p["resumable"],p["upgrades"])==(17,17,1,16)
+    r=enqueue(q);assert (r["queued"],r["resumed"])==(16,1)
+    assert preview(q)["excluded"]=={"active":17}
+    with connect() as c:assert c.execute("SELECT next_ply FROM jobs WHERE game_id=1 AND status='queued'").fetchone()[0]==2
+
+def test_deeper_completed_and_multipv_coverage(tmp_path,monkeypatch):
+    from chessbuilder.engine import preview,settings_json
+    monkeypatch.setenv("CHESSBUILDER_DATA_DIR",str(tmp_path));migrate()
+    g,p=next(parse('[Result "*"]\n\n1. e4 *'));store(g,p)
+    with connect() as c:c.execute("INSERT INTO jobs(game_id,settings,status,next_ply) VALUES(1,?,'done',2)",(settings_json(Settings(level="deep",multipv=2)),))
+    assert preview(QueueRequest(level="quick"))["excluded"]=={"completed":1}
+    assert preview(QueueRequest(level="deep",multipv=3))["eligible"]==1
+    assert preview(QueueRequest(level="detailed"))["eligible"]==1
+    assert preview(QueueRequest(level="deep",skip_completed=False))["excluded"]=={"completed":1}

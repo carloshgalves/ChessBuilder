@@ -4,9 +4,9 @@
 
 Plataforma local de análise e treinamento de xadrez baseada no histórico de partidas do jogador. O Chess Builder conecta análise computacional, diagnóstico de competências e prática personalizada em um ciclo contínuo de aprendizagem.
 
-> Status: em planejamento. A implementação será acompanhada nas [issues do projeto](https://github.com/carloshgalves/ChessBuilder/issues).
+> Status: em desenvolvimento, com as fases F0–F16 integradas e validações adicionais em andamento. Acompanhe as [issues do projeto](https://github.com/carloshgalves/ChessBuilder/issues).
 
-## Funcionalidades planejadas
+## Funcionalidades
 
 | Módulo | Funcionalidades |
 | --- | --- |
@@ -34,7 +34,7 @@ flowchart LR
 
 O diagnóstico considera oportunidades, frequência, gravidade e recorrência dos erros. Os exercícios preservam a origem da posição e as variantes relevantes. O progresso é medido tanto nas sessões de estudo quanto nas partidas posteriores.
 
-## Arquitetura proposta
+## Arquitetura
 
 ```mermaid
 flowchart TD
@@ -60,7 +60,7 @@ flowchart TD
 | Finais | Syzygy |
 | Testes | Pytest, Vitest e Playwright |
 
-A aplicação será single-user, executada localmente, com análise progressiva, cache, retomada de jobs e limites configuráveis de recursos. O diagnóstico e o treinamento funcionam sem serviços generativos.
+A aplicação é single-user, executada localmente, com análise progressiva, cache, retomada de jobs e limites configuráveis de recursos. O diagnóstico e o treinamento funcionam sem serviços generativos.
 
 ## Roadmap
 
@@ -122,3 +122,7 @@ Abra http://127.0.0.1:5173. Os dados ficam em `~/.local/share/chessbuilder` (ove
 ### Stockfish
 
 Instale o Stockfish pelo gerenciador de pacotes (Debian: `sudo apt install stockfish`) ou aponte `CHESSBUILDER_STOCKFISH` para o executável. Na aba Análise, configure nível, threads, hash e variantes; a fila processa uma partida por vez. Pausa e retomada ocorrem entre lances. Execute apenas uma instância do backend (um worker Uvicorn).
+
+### Análise seletiva
+
+Na aba Análise, selecione conta, origem, ritmo, período e tamanho do lote (padrão 100). A prévia não altera a fila. Partidas com análise concluída de profundidade e cobertura iguais ou superiores são ignoradas por padrão; uma análise rápida não bloqueia uma profunda; jobs interrompidos com as mesmas configurações podem ser retomados do checkpoint. Pausar todos interrompe a fila entre lances, preservando avaliações. Selecionar novo lote não pausa os jobs existentes automaticamente. O modo de aprofundamento automático fica desativado inicialmente para reduzir o custo da análise em lote.
