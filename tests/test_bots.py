@@ -14,3 +14,8 @@ def test_resumable_legal_game(tmp_path,monkeypatch):
     monkeypatch.setattr("chessbuilder.bots.motor_candidates",lambda *args:[{"cp":10,"mate":None,"pv":["e7e5"]}])
     g=advance(g["id"],Command(revision=g["revision"]))
     assert g["human_turn"] and len(g["moves"])==2 and detail(g["id"])["fen"]==g["fen"]
+
+def test_calibration_excludes_incomplete():
+    from chessbuilder.calibrate_bots import summarize
+    r=summarize([{"result":"win","policy_moves":10,"captures":2,"checks":1,"candidate_cp_loss":100},{"result":"*","policy_moves":10,"captures":0,"checks":0,"candidate_cp_loss":0}])
+    assert r["completed"]==1 and r["incomplete"]==1 and r["score"]==1 and r["capture_rate"]==0.1
