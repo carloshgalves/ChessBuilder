@@ -2,7 +2,7 @@
 import hashlib
 import io
 import json
-import re
+import tempfile
 from typing import Literal
 import chess
 from fastapi import APIRouter,HTTPException
@@ -37,6 +37,7 @@ class Region(BaseModel):
 class Calibrate(BaseModel):
     region:Region
     fen:str=Field(max_length=120)
+    previous:str|None=Field(default=None,pattern="^[a-f0-9]{64}$")
 
 class Recognize(BaseModel):
     region:Region
@@ -121,14 +122,34 @@ def page_image(mid:int,page:int):
 def calibration_path(mid,digest):
     return folder()/f"diagram-{mid}-{digest}.json"
 
+def load_calibration(mid,sha):
+    path=calibration_path(mid,sha)
+    if not path.is_file():raise HTTPException(404,"Calibração inexistente")
+    raw=path.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=sha:raise HTTPException(409,"Calibração alterada")
+    data=json.loads(raw)
+    if data.get("version")!=VERSION:raise HTTPException(409,"Versão de calibração incompatível")
+    if "samples" not in data:data["samples"]=[{"region":data["region"],"fen":data["fen"]}]
+    return data
+
 @router.post("/{mid}/calibrate")
 def calibrate(mid:int,body:Calibrate):
     try:templates=make_templates(extract_cells(render(mid,body.region.page),body.region),body.fen,body.region.orientation)
     except ValueError as exc:raise HTTPException(422,"FEN inválida") from exc
-    payload={"version":VERSION,"region":body.region.model_dump(),"fen":body.fen,"templates":templates}
+    samples=[{"region":body.region.model_dump(),"fen":body.fen}]
+    if body.previous:
+        previous=load_calibration(mid,body.previous)
+        if len(previous["templates"])>=512:raise HTTPException(422,"Limite de oito diagramas de calibração")
+        templates=previous["templates"]+templates
+        samples=previous["samples"]+samples
+    payload={"version":VERSION,"samples":samples,"templates":templates}
     raw=json.dumps(payload,separators=(",",":")).encode();sha=hashlib.sha256(raw).hexdigest()
-    path=calibration_path(mid,sha);path.write_bytes(raw)
-    return {"calibration":sha,"classes":sorted({t["piece"] for t in templates})}
+    path=calibration_path(mid,sha)
+    with tempfile.NamedTemporaryFile(dir=folder(),delete=False) as f:
+        f.write(raw);tmp=f.name
+    from pathlib import Path
+    Path(tmp).replace(path)
+    return {"calibration":sha,"classes":sorted({t["piece"] for t in templates}),"samples":len(samples)}
 
 @router.post("/{mid}/recognize")
 def recognize(mid:int,body:Recognize):
@@ -136,11 +157,7 @@ def recognize(mid:int,body:Recognize):
         r=candidate(c,body.candidate_id)
         if r["material_id"]!=mid or r["status"]!="draft":raise HTTPException(409,"Selecione um rascunho do material")
         if r["page"]!=body.region.page:raise HTTPException(422,"Página do candidato não coincide")
-    path=calibration_path(mid,body.calibration)
-    if not path.is_file():raise HTTPException(404,"Calibração inexistente")
-    raw=path.read_bytes()
-    if hashlib.sha256(raw).hexdigest()!=body.calibration:raise HTTPException(409,"Calibração alterada")
-    payload=json.loads(raw)
+    payload=load_calibration(mid,body.calibration)
     result=classify(extract_cells(render(mid,body.region.page),body.region),payload["templates"],body.region.orientation,body.turn)
     # No database changes here. The existing editor requires manual approval.
     return {**result,"provenance":{"material_id":mid,"candidate_id":body.candidate_id,"region":body.region.model_dump(),"calibration":body.calibration,"version":VERSION}}

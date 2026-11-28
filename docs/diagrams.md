@@ -1,2 +1,4 @@
 # Book diagram recognition
 Install `pip install -e '.[diagrams,test]'`. Render a page locally, select the internal board rectangle, and calibrate from a known FEN in the same print style. The classifier uses same-square-color templates and rejects large residuals or ambiguous labels. A draft can be transferred to the existing editor, never published directly. The user supplies orientation, side to move and must inspect all squares and unobservable rights. Calibration files stay in local book storage. Automatic page-wide detection, unseen-font recognition and empirical accuracy validation remain outstanding. Synthetic fixtures are not a real-book benchmark.
+
+A calibration can accumulate up to eight annotated diagrams from the same material. Use different piece placements to cover both square colors. Clear the identifier to start a new calibration. A low residual does not prove correctness if a piece class is absent; every square requires review.
