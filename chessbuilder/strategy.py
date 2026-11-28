@@ -1,7 +1,7 @@
 """Conservative positional feature contrasts from matched legal continuations."""
 import chess
 from chessbuilder.tactics import legal_line,scan,balance,phase
-VERSION="strategy-v1"
+VERSION="strategy-v2"
 LABELS={
  "pawn_structure":"Estrutura de peões","weak_squares":"Casas centrais vulneráveis",
  "open_files":"Colunas de torre","activity":"Atividade das peças",
@@ -55,6 +55,59 @@ def features(b,color):
     relative["compensation"]=balance(b,color)
     return relative
 
+def concrete_evidence(b,color,theme):
+    """Describe observable geometric features; not an inferred plan."""
+    pawns=b.pieces(chess.PAWN,color);enemy=b.pieces(chess.PAWN,not color)
+    files={f:[sq for sq in pawns if chess.square_file(sq)==f] for f in range(8)}
+    name=chess.square_name
+    def names(xs):return [name(s) for s in sorted(xs)]
+    if theme=="pawn_structure":
+        isolated=[sq for f,ss in files.items() if not any(files.get(x) for x in (f-1,f+1)) for sq in ss]
+        doubled=[sq for ss in files.values() if len(ss)>1 for sq in ss]
+        return {"Peões isolados":names(isolated),"Peões em colunas dobradas":names(doubled)}
+    if theme=="passed_pawns":
+        passed=[sq for sq in pawns if not any(abs(chess.square_file(t)-chess.square_file(sq))<=1 and (chess.square_rank(t)>chess.square_rank(sq) if color else chess.square_rank(t)<chess.square_rank(sq)) for t in enemy)]
+        return {"Peões passados":names(passed)}
+    if theme=="open_files":
+        rooks=[sq for sq in b.pieces(chess.ROOK,color) if not files[chess.square_file(sq)]]
+        return {"Torres em colunas abertas":names(sq for sq in rooks if not any(chess.square_file(t)==chess.square_file(sq) for t in enemy)),
+                "Torres em colunas semiabertas":names(sq for sq in rooks if any(chess.square_file(t)==chess.square_file(sq) for t in enemy))}
+    if theme=="weak_squares":
+        central=[chess.square(f,r) for f in range(2,6) for r in ([2,3] if color else [4,5])]
+        return {"Casas centrais atacadas sem defesa de peão":names(sq for sq in central if not (b.attackers(color,sq)&pawns) and b.is_attacked_by(not color,sq))}
+    if theme=="king_safety":
+        king=b.king(color)
+        if king is None:return {}
+        ring=set(chess.SquareSet(chess.BB_KING_ATTACKS[king]))|{king}
+        return {"Rei":[name(king)],"Peões no entorno":names(sq for sq in ring if sq in pawns),"Casas do entorno atacadas":names(sq for sq in ring if b.is_attacked_by(not color,sq))}
+    if theme=="bishop_pair":return {"Bispos":names(b.pieces(chess.BISHOP,color))}
+    controlled=set();activity={}
+    own=b.occupied_co[color]
+    for sq,p in b.piece_map().items():
+        if p.color!=color:continue
+        targets=set(b.attacks(sq))
+        if b.is_pinned(color,sq):targets={t for t in targets if t in b.pin(color,sq)}
+        controlled.update(targets)
+        if p.piece_type not in (chess.KNIGHT,chess.BISHOP,chess.ROOK,chess.QUEEN):continue
+        useful={t for t in targets if not chess.BB_SQUARES[t]&own}
+        if theme=="activity":useful={t for t in useful if (chess.square_rank(t)>=4 if color else chess.square_rank(t)<=3)}
+        activity[p.symbol().upper()+" "+name(sq)]=names(useful)
+    if theme=="space":return {"Casas controladas na metade adversária":names(t for t in controlled if (chess.square_rank(t)>=4 if color else chess.square_rank(t)<=3))}
+    if theme in ("activity","mobility","prophylaxis"):return activity
+    return {}
+
+def contextual_contrast(board,good,bad,theme):
+    color=board.turn;a=legal_line(board,good);z=legal_line(board,bad)
+    n=min(len(a),len(z),5)
+    if not n:return {}
+    if theme=="prophylaxis":color=not color
+    return {"side":"white" if color else "black","ply":n,
+            "before":concrete_evidence(board,color,theme),
+            "reference":concrete_evidence(a[n-1][2],color,theme),
+            "compared":concrete_evidence(z[n-1][2],color,theme),
+            "reference_san":[x[3] for x in a[:n]],"compared_san":[x[3] for x in z[:n]],
+            "reference_fen":a[n-1][2].fen(),"compared_fen":z[n-1][2].fen()}
+
 def compare_lines(board,good,bad):
     """Compare the same number of plies; no extrapolation from short PVs."""
     a=legal_line(board,good);z=legal_line(board,bad)
@@ -69,6 +122,9 @@ def compare_lines(board,good,bad):
         if min(differences)<threshold:continue
         # Prophylaxis is a measured restriction, not an inferred intention.
         findings.append({"theme":"strategy:"+theme,"label":LABELS[theme],"kind":"missed","confidence":"persistent_contrast","side":"best","evidence":{"before":before[theme],"best":[x[theme] for x in best],"played":[x[theme] for x in played],"plies":[i+1 for i in sample],"best_pv":good[:sample[-1]+1],"played_pv":bad[:sample[-1]+1]},"explanation":f"{LABELS[theme]}: o indicador relativo favorece a linha de referência nos {len(sample)} pontos comparados. A relação causal não está demonstrada."})
+    for f in findings:
+        theme=f["theme"].split(":",1)[1]
+        f["evidence"]["context"]=contextual_contrast(board,good,bad,theme)
     # Exchanges/compensation are descriptive evidence, not scored opportunities.
     return findings
 

@@ -17,3 +17,12 @@ def test_shallow_abstention():
     a={"perspective":"white","settings":{"level":"quick"},"best":{"cp":200,"mate":None,"pv":["e2e4"]},"played":{"cp":0,"mate":None,"pv":["a2a3"]}}
     d=diagnose_strategy(b,chess.Move.from_uci("a2a3"),a)
     assert d["status"]=="abstain" and not d["findings"]
+
+def test_concrete_open_file_witness():
+    from chessbuilder.strategy import contextual_contrast
+    b=chess.Board("4k3/pp3ppp/8/8/8/8/PP3PPP/R3K2R w KQ - 0 1")
+    good=["a1d1","e8f8","h1g1"];bad=["a1b1","e8f8","h1g1"]
+    c=contextual_contrast(b,good,bad,"open_files")
+    assert c["ply"]==3 and c["reference"]["Torres em colunas abertas"]==["d1"]
+    assert c["compared"]["Torres em colunas abertas"]==[]
+    assert c["reference_san"][0]=="Rd1"
