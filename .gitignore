@@ -13,3 +13,7 @@ dist/
 *.pdf
 *.rtbw
 *.rtbz
+
+# Private study materials
+*.pdf
+*.fen

@@ -1,0 +1,2 @@
+# Private book materials
+PDF, PGN and FEN import; local PDF storage, page text extraction, FEN detection, manual diagram review and solution-page association. The author and engine continuations are stored separately. Author mode grades authored legal lines; engine/hybrid modes grade recorded equivalent roots. No OCR or automatic piece recognition is claimed: raster diagrams require visual transcription, and every candidate requires approval. No private PDF or extraction is committed.
