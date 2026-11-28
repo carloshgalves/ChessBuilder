@@ -72,3 +72,6 @@ app.include_router(time_router)
 
 from chessbuilder.explore import router as explore_router
 app.include_router(explore_router)
+
+from chessbuilder.diagrams import router as diagram_router
+app.include_router(diagram_router)
