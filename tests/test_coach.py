@@ -75,3 +75,23 @@ def test_plan_does_not_repeat_same_position(local):
         for key in ("a","b"):
             insert_item(c,"lichess",None,None,None,chess.Board(),"calculation",["fork"],[["e2e4"]],{},1500,key)
     assert len(create_session(PlanRequest(minutes=20))["items"])==1
+
+def test_adaptive_separates_novel_repeat_and_sources(local):
+    from chessbuilder.adaptive import practice_profile,practice_signal
+    from datetime import date
+    with connect() as c:
+        b=chess.Board()
+        for i in range(8):
+            pos=chess.Board()
+            pos.push(list(pos.legal_moves)[i])
+            move=next(iter(pos.legal_moves)).uci()
+            insert_item(c,"lichess",None,None,None,pos,"calculation",["fork"],[[move]],{},1500,"adaptive-"+str(i))
+            c.execute("INSERT INTO training_attempts(item_id,started_at,finished_at,correct,hints,status) VALUES(?,?,?,?,?,?)",(i+1,"2026-01-01T10:00:00+00:00","2026-01-01T10:01:00+00:00",1,0 if i<3 else 1,"passed"))
+        c.execute("INSERT INTO training_attempts(item_id,started_at,finished_at,correct,hints,status) VALUES(1,'2026-01-02T10:00:00+00:00','2026-01-02T10:01:00+00:00',1,0,'passed')")
+        p=practice_profile(c,date(2026,1,2))
+        assert len(p)==1 and p[0]["novel"]==8 and p[0]["unassisted"]==3 and p[0]["repeat"]==1
+        assert p[0]["target_difficulty"]==1400
+        r=c.execute("SELECT * FROM training_items WHERE id=1").fetchone()
+        score,reasons=practice_signal(r,p)
+        assert score>0 and any("1400" in x for x in reasons)
+        assert practice_profile(c,date(2025,12,31))==[]
