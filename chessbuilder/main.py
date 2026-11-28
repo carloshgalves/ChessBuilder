@@ -57,3 +57,6 @@ app.include_router(historical_router)
 
 from chessbuilder.books import router as book_router
 app.include_router(book_router)
+
+from chessbuilder.bots import router as bot_router
+app.include_router(bot_router)
