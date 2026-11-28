@@ -44,7 +44,7 @@ def migrate(path=None):
     with connect(path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
         version = conn.execute("PRAGMA user_version").fetchone()[0]
-        if version > 8:
+        if version > 9:
             raise RuntimeError("Database schema is newer than this application")
         if version == 0:
             conn.executescript("BEGIN IMMEDIATE;"+SCHEMA+"PRAGMA user_version=1; COMMIT;")
@@ -62,6 +62,8 @@ def migrate(path=None):
             conn.executescript("BEGIN IMMEDIATE;"+BOT_SCHEMA+"PRAGMA user_version=7; COMMIT;")
         if version < 8:
             conn.executescript("BEGIN IMMEDIATE;"+TOURNAMENT_SCHEMA+"PRAGMA user_version=8; COMMIT;")
+        if version < 9:
+            conn.executescript("BEGIN IMMEDIATE;"+ASSISTANT_SCHEMA+"PRAGMA user_version=9; COMMIT;")
 
 TRAINING_SCHEMA = """
 CREATE TABLE IF NOT EXISTS training_items(
@@ -134,4 +136,9 @@ TOURNAMENT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS tournaments(id INTEGER PRIMARY KEY,name TEXT NOT NULL,start_date TEXT NOT NULL,end_date TEXT NOT NULL,minutes INTEGER NOT NULL,increment INTEGER NOT NULL,rounds INTEGER NOT NULL,goal TEXT NOT NULL,player TEXT NOT NULL,initial_rating INTEGER,final_rating INTEGER,notes TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS tournament_rounds(tournament_id INTEGER NOT NULL REFERENCES tournaments(id),round INTEGER NOT NULL,opponent TEXT NOT NULL,color TEXT,result TEXT NOT NULL,opponent_rating INTEGER,notes TEXT NOT NULL,game_id INTEGER REFERENCES games(id),PRIMARY KEY(tournament_id,round));
 CREATE TABLE IF NOT EXISTS tournament_simulations(tournament_id INTEGER NOT NULL REFERENCES tournaments(id),bot_game_id INTEGER NOT NULL UNIQUE REFERENCES bot_games(id),PRIMARY KEY(tournament_id,bot_game_id));
+"""
+
+ASSISTANT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS explanation_cache(cache_key TEXT PRIMARY KEY,payload TEXT NOT NULL,created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS explanation_usage(day TEXT PRIMARY KEY,calls INTEGER NOT NULL);
 """
